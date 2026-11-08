@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.6.5  (AutoPlay pathing fixed - no more step-stutter)
+    Version: 4.6.6  (LOS look-ahead + direct chase - smooth walking)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -310,7 +310,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.6.5"
+    title.Text = "MM2 Script  -  v4.6.6"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -1180,12 +1180,7 @@ local function shootAtVector3(targetVector3)
     end
 end
 
--- ===================== AUTO PLAY (PATHFINDING) =====================
--- Only recompute path when:
---   1. No current path
---   2. We've reached the end of the current path
---   3. Target moved > 10 studs from where we last computed the path
--- This prevents the "1 step at a time" stutter caused by resetting waypoint index every 0.4s.
+-- ===================== AUTO PLAY (PATHFINDING - SMOOTH) =====================
 local AutoPlayActive = false
 local autoPlayConnection = nil
 local currentPath = nil
@@ -1194,6 +1189,9 @@ local currentWaypointIndex = 1
 local lastPathTargetPos = nil
 local ATTACK_DISTANCE = 5
 local PATH_RECOMPUTE_TARGET_DELTA = 10
+local MIN_DIRECT_CHASE_DIST = 6
+local MAX_LOOKAHEAD_DIST = 40
+local LOOKAHEAD_STEPS = 5
 local stuckCheckPos = nil
 local stuckCheckTime = 0
 local stuckCounter = 0
@@ -1218,12 +1216,12 @@ local function computePathTo(fromPos, toPos)
             AgentCanClimb = true
         })
     end)
-    if not ok or not path then return nil, "CreatePath failed" end
+    if not ok or not path then return nil end
     local computeOk = pcall(function() path:ComputeAsync(fromPos, toPos) end)
-    if not computeOk then return nil, "ComputeAsync errored" end
-    if path.Status ~= Enum.PathStatus.Success then return nil, "status " .. tostring(path.Status) end
+    if not computeOk then return nil end
+    if path.Status ~= Enum.PathStatus.Success then return nil end
     local wps = path:GetWaypoints()
-    if not wps or #wps < 2 then return nil, "too few waypoints" end
+    if not wps or #wps < 2 then return nil end
     return path, wps
 end
 
@@ -1251,6 +1249,9 @@ local function startMurdererAutoPlay()
         local myRoot = char:FindFirstChild("HumanoidRootPart")
         if not hum or not myRoot or hum.Health <= 0 then return end
 
+        -- Ensure walk speed is usable
+        if hum.WalkSpeed < 14 then hum.WalkSpeed = 16 end
+
         local myPos = myRoot.Position
 
         -- Find nearest valid target
@@ -1262,10 +1263,7 @@ local function startMurdererAutoPlay()
             if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then continue end
             if not IsAlive(player) then continue end
             local dist = (myPos - player.Character.HumanoidRootPart.Position).Magnitude
-            if dist < nearest then
-                nearest = dist
-                target = player
-            end
+            if dist < nearest then nearest = dist; target = player end
         end
 
         if not target then
@@ -1276,6 +1274,7 @@ local function startMurdererAutoPlay()
         local targetPos = target.Character.HumanoidRootPart.Position
         local distanceToTarget = (myPos - targetPos).Magnitude
 
+        -- Attack if in range
         if distanceToTarget <= ATTACK_DISTANCE then
             local knife = LocalPlayer.Backpack:FindFirstChild("Knife") or char:FindFirstChild("Knife")
             if knife then
@@ -1289,25 +1288,56 @@ local function startMurdererAutoPlay()
             return
         end
 
+        -- Manual direct chase mode (debug / user-forced)
         if Config.Helper.DirectChase then
             hum:MoveTo(targetPos)
             return
         end
 
-        -- Recompute path only when genuinely needed
+        -- Build raycast params once
+        local rayParams = RaycastParams.new()
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        rayParams.FilterDescendantsInstances = {char}
+        local eyePos = myPos + Vector3.new(0, 2.5, 0)
+        local targetEyePos = targetPos + Vector3.new(0, 2.5, 0)
+        local targetVisible = not workspace:Raycast(eyePos, targetEyePos - eyePos, rayParams)
+
+        -- Stuck detection
+        if not stuckCheckPos then
+            stuckCheckPos = myPos
+            stuckCheckTime = tick()
+        elseif tick() - stuckCheckTime >= 0.6 then
+            if (myPos - stuckCheckPos).Magnitude < 1.5 then
+                stuckCounter = stuckCounter + 1
+                hum.Jump = true
+            else
+                stuckCounter = 0
+            end
+            stuckCheckPos = myPos
+            stuckCheckTime = tick()
+        end
+
+        -- Direct chase when target is visible and we aren't stuck
+        if targetVisible and stuckCounter < 2 and distanceToTarget >= MIN_DIRECT_CHASE_DIST then
+            hum:MoveTo(targetPos)
+            currentPath = nil
+            currentWaypoints = {}
+            currentWaypointIndex = 1
+            lastPathTargetPos = nil
+            return
+        end
+
+        -- Pathfinding fallback for when target is hidden
         if shouldRecomputePath(targetPos) then
-            local newPath, wpsOrStatus = computePathTo(myPos, targetPos)
+            local newPath, wpsOrNil = computePathTo(myPos, targetPos)
             if newPath then
                 currentPath = newPath
-                currentWaypoints = wpsOrStatus
+                currentWaypoints = wpsOrNil
                 currentWaypointIndex = 2
                 lastPathTargetPos = targetPos
                 stuckCounter = 0
-                stuckCheckPos = nil
             else
-                -- Fallback to direct chase for this frame
                 hum:MoveTo(targetPos)
-                -- If pathing keeps failing, don't spam the console
                 return
             end
         end
@@ -1317,12 +1347,12 @@ local function startMurdererAutoPlay()
             return
         end
 
-        -- Advance past any waypoints we've already hit
+        -- Advance past reached waypoints (tight tolerance so we don't skip real progress)
         while currentWaypointIndex <= #currentWaypoints do
             local wp = currentWaypoints[currentWaypointIndex]
             local diff = myPos - wp.Position
             local horiz = Vector3.new(diff.X, 0, diff.Z).Magnitude
-            local tol = (wp.Action == Enum.PathWaypointAction.Jump) and 4 or 2.5
+            local tol = (wp.Action == Enum.PathWaypointAction.Jump) and 4 or 2
             if horiz <= tol then
                 currentWaypointIndex = currentWaypointIndex + 1
             else
@@ -1330,39 +1360,32 @@ local function startMurdererAutoPlay()
             end
         end
 
-        -- If we finished the path but haven't reached target, allow recompute next frame
         if currentWaypointIndex > #currentWaypoints then
             hum:MoveTo(targetPos)
             return
         end
 
-        -- Stuck detection: force a fresh path if we aren't progressing
-        if not stuckCheckPos then
-            stuckCheckPos = myPos
-            stuckCheckTime = tick()
-        elseif tick() - stuckCheckTime > 0.75 then
-            if (myPos - stuckCheckPos).Magnitude < 1.5 then
-                stuckCounter = stuckCounter + 1
-                hum.Jump = true
-                if stuckCounter >= 2 then
-                    currentPath = nil
-                    currentWaypoints = {}
-                    currentWaypointIndex = 1
-                    lastPathTargetPos = nil
-                    stuckCounter = 0
-                end
-            else
-                stuckCounter = 0
-            end
-            stuckCheckPos = myPos
-            stuckCheckTime = tick()
+        -- LOS look-ahead: pick the furthest waypoint we can see through
+        local steerIdx = currentWaypointIndex
+        for i = currentWaypointIndex + 1, math.min(currentWaypointIndex + LOOKAHEAD_STEPS, #currentWaypoints) do
+            -- Don't skip past a jump waypoint (need to execute it first)
+            if currentWaypoints[i - 1].Action == Enum.PathWaypointAction.Jump then break end
+            local wp = currentWaypoints[i]
+            if (wp.Position - myPos).Magnitude > MAX_LOOKAHEAD_DIST then break end
+            local wpEye = wp.Position + Vector3.new(0, 2.5, 0)
+            if workspace:Raycast(eyePos, wpEye - eyePos, rayParams) then break end
+            steerIdx = i
         end
 
-        local wp = currentWaypoints[currentWaypointIndex]
-        if wp.Action == Enum.PathWaypointAction.Jump then
-            hum.Jump = true
+        -- Jump if any waypoint up to the steering target requires a jump
+        for i = currentWaypointIndex, steerIdx do
+            if currentWaypoints[i].Action == Enum.PathWaypointAction.Jump then
+                hum.Jump = true
+                break
+            end
         end
-        hum:MoveTo(wp.Position)
+
+        hum:MoveTo(currentWaypoints[steerIdx].Position)
     end)
 end
 
@@ -1597,5 +1620,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.6.5 - smooth pathing", 5)
-warn("[MM2] v4.6.5 ready")
+Notify("MM2 Script", "Loaded! v4.6.6 - smooth pathing", 5)
+warn("[MM2] v4.6.6 ready")

@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.9.0  (KILASIK multi-target fling + wall-clip/secret-passage nav)
+    Version: 4.9.1  (unified path execution — innocent & murderer share nav logic)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -86,7 +86,6 @@ local function SaveSettings()
     data.TriggerTraps = Config.Helper.TriggerTraps
     data.GunESP = Config.ESP.GunESP
     data.InnocentAutoPlayer = Config.Helper.InnocentAutoPlayer
-    -- Multi-target fling selections
     local flingNames = {}
     for name, _ in pairs(Config.Troll.SelectedTargets) do flingNames[#flingNames + 1] = name end
     data.FlingTargets = flingNames
@@ -138,11 +137,10 @@ Config = {
         TriggerTraps = savedData.TriggerTraps or false
     },
     Troll = {
-        SelectedTargets = {},   -- name -> Player
+        SelectedTargets = {},
         LoopGoToEnabled = savedData.LoopGoToEnabled or false
     }
 }
--- Restore saved fling targets
 if savedData.FlingTargets then
     for _, name in ipairs(savedData.FlingTargets) do
         local p = Players:FindFirstChild(name)
@@ -324,7 +322,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.9.0"
+    title.Text = "MM2 Script  -  v4.9.1"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -689,15 +687,13 @@ local function stopTrapTrigger()
     trapProcessing = false
 end
 
--- ===================== FLING (KILASIK / zqyDSUWX technique — unchanged) =====================
+-- ===================== FLING (KILASIK technique) =====================
 getgenv().OldPos = nil
 getgenv().FPDH = workspace.FallenPartsDestroyHeight
 local FlingActive = false
 local flingLoopThread = nil
 
-local function Message(Title, Text, Time)
-    Notify(Title, Text, Time or 3)
-end
+local function Message(Title, Text, Time) Notify(Title, Text, Time or 3) end
 
 local function SkidFling(TargetPlayer)
     local Player = LocalPlayer
@@ -706,53 +702,25 @@ local function SkidFling(TargetPlayer)
     local RootPart = Humanoid and Humanoid.RootPart
     local TCharacter = TargetPlayer.Character
     if not TCharacter then return end
-
-    local THumanoid
-    local TRootPart
-    local THead
-    local Accessory
-    local Handle
-    if TCharacter:FindFirstChildOfClass("Humanoid") then
-        THumanoid = TCharacter:FindFirstChildOfClass("Humanoid")
-    end
-    if THumanoid and THumanoid.RootPart then
-        TRootPart = THumanoid.RootPart
-    end
-    if TCharacter:FindFirstChild("Head") then
-        THead = TCharacter.Head
-    end
-    if TCharacter:FindFirstChildOfClass("Accessory") then
-        Accessory = TCharacter:FindFirstChildOfClass("Accessory")
-    end
-    if Accessory and Accessory:FindFirstChild("Handle") then
-        Handle = Accessory.Handle
-    end
-
+    local THumanoid, TRootPart, THead, Accessory, Handle
+    if TCharacter:FindFirstChildOfClass("Humanoid") then THumanoid = TCharacter:FindFirstChildOfClass("Humanoid") end
+    if THumanoid and THumanoid.RootPart then TRootPart = THumanoid.RootPart end
+    if TCharacter:FindFirstChild("Head") then THead = TCharacter.Head end
+    if TCharacter:FindFirstChildOfClass("Accessory") then Accessory = TCharacter:FindFirstChildOfClass("Accessory") end
+    if Accessory and Accessory:FindFirstChild("Handle") then Handle = Accessory.Handle end
     if Character and Humanoid and RootPart then
-        if RootPart.Velocity.Magnitude < 50 then
-            getgenv().OldPos = RootPart.CFrame
-        end
-        if THumanoid and THumanoid.Sit then
-            return Message("Error", TargetPlayer.Name .. " is sitting", 2)
-        end
-        if THead then
-            workspace.CurrentCamera.CameraSubject = THead
-        elseif Handle then
-            workspace.CurrentCamera.CameraSubject = Handle
-        elseif THumanoid and TRootPart then
-            workspace.CurrentCamera.CameraSubject = THumanoid
-        end
-        if not TCharacter:FindFirstChildWhichIsA("BasePart") then
-            return
-        end
-
+        if RootPart.Velocity.Magnitude < 50 then getgenv().OldPos = RootPart.CFrame end
+        if THumanoid and THumanoid.Sit then return Message("Error", TargetPlayer.Name .. " is sitting", 2) end
+        if THead then workspace.CurrentCamera.CameraSubject = THead
+        elseif Handle then workspace.CurrentCamera.CameraSubject = Handle
+        elseif THumanoid and TRootPart then workspace.CurrentCamera.CameraSubject = THumanoid end
+        if not TCharacter:FindFirstChildWhichIsA("BasePart") then return end
         local FPos = function(BasePart, Pos, Ang)
             RootPart.CFrame = CFrame.new(BasePart.Position) * Pos * Ang
             Character:SetPrimaryPartCFrame(CFrame.new(BasePart.Position) * Pos * Ang)
             RootPart.Velocity = Vector3.new(9e7, 9e7 * 10, 9e7)
             RootPart.RotVelocity = Vector3.new(9e8, 9e8, 9e8)
         end
-
         local SFBasePart = function(BasePart)
             local TimeToWait = 2
             local Time = tick()
@@ -792,30 +760,19 @@ local function SkidFling(TargetPlayer)
                 end
             until Time + TimeToWait < tick() or not FlingActive
         end
-
         workspace.FallenPartsDestroyHeight = 0 / 0
-
         local BV = Instance.new("BodyVelocity")
         BV.Parent = RootPart
         BV.Velocity = Vector3.new(0, 0, 0)
         BV.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-
         Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
-
-        if TRootPart then
-            SFBasePart(TRootPart)
-        elseif THead then
-            SFBasePart(THead)
-        elseif Handle then
-            SFBasePart(Handle)
-        else
-            return Message("Error", TargetPlayer.Name .. " has no valid parts", 2)
-        end
-
+        if TRootPart then SFBasePart(TRootPart)
+        elseif THead then SFBasePart(THead)
+        elseif Handle then SFBasePart(Handle)
+        else return Message("Error", TargetPlayer.Name .. " has no valid parts", 2) end
         BV:Destroy()
         Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
         workspace.CurrentCamera.CameraSubject = Humanoid
-
         if getgenv().OldPos then
             repeat
                 RootPart.CFrame = getgenv().OldPos * CFrame.new(0, 0.5, 0)
@@ -843,22 +800,15 @@ end
 
 local function startFlingLoop()
     if FlingActive then return end
-    if countSelectedTargets() == 0 then
-        Notify("Troll", "No targets selected", 3)
-        return
-    end
+    if countSelectedTargets() == 0 then Notify("Troll", "No targets selected", 3); return end
     FlingActive = true
     Notify("Fling", "Started - flinging " .. countSelectedTargets() .. " target(s)", 2)
-
     flingLoopThread = task.spawn(function()
         while FlingActive do
             local validTargets = {}
             for name, player in pairs(Config.Troll.SelectedTargets) do
-                if player and player.Parent then
-                    validTargets[name] = player
-                else
-                    Config.Troll.SelectedTargets[name] = nil
-                end
+                if player and player.Parent then validTargets[name] = player
+                else Config.Troll.SelectedTargets[name] = nil end
             end
             for _, player in pairs(validTargets) do
                 if not FlingActive then break end
@@ -869,12 +819,10 @@ local function startFlingLoop()
         end
     end)
 end
-
 local function stopFlingLoop()
     if not FlingActive then return end
     FlingActive = false
     Notify("Fling", "Stopped", 2)
-    -- Reset FallenPartsDestroyHeight in case we stopped mid-fling
     pcall(function() workspace.FallenPartsDestroyHeight = getgenv().FPDH end)
 end
 
@@ -883,7 +831,6 @@ local function startLoopGoTo()
     if loopGoToConnection then return end
     loopGoToConnection = RunService.Heartbeat:Connect(function()
         if not Config.Troll.LoopGoToEnabled then stopLoopGoTo(); return end
-        -- Use the first selected target as the go-to target
         local firstTarget = nil
         for _, p in pairs(Config.Troll.SelectedTargets) do firstTarget = p; break end
         if not firstTarget then return end
@@ -982,7 +929,7 @@ UI:CreateToggle(helperTab, "Trigger Traps", Config.Helper.TriggerTraps, function
     if v then startTrapTrigger() else stopTrapTrigger() end
 end)
 
--- ===================== TROLL TAB (Multi-target fling list) =====================
+-- ===================== TROLL TAB (Multi-target fling) =====================
 UI:CreateLabel(trollTab, "Troll Features — Multi-Target Fling")
 local trollStatusLabel = Instance.new("TextLabel")
 trollStatusLabel.Size = UDim2.new(1, -10, 0, 22)
@@ -1021,13 +968,10 @@ local function refreshTrollStatus()
     end
 end
 
-local trollCheckmarks = {}
-
 local function refreshTrollList()
     for _, child in pairs(trollListFrame:GetChildren()) do
         if child:IsA("Frame") or child:IsA("TextButton") then child:Destroy() end
     end
-    trollCheckmarks = {}
     local list = Players:GetPlayers()
     table.sort(list, function(a, b) return a.Name:lower() < b.Name:lower() end)
     for _, p in ipairs(list) do
@@ -1087,12 +1031,9 @@ local function refreshTrollList()
             refreshTrollStatus()
             SaveSettings()
         end)
-
-        trollCheckmarks[p.Name] = check
     end
     trollListFrame.CanvasSize = UDim2.new(0, 0, 0, #list * 28)
 end
-
 refreshTrollList()
 refreshTrollStatus()
 
@@ -1103,7 +1044,6 @@ flingBtnRow.Parent = trollTab
 
 local startFlingBtn = Instance.new("TextButton")
 startFlingBtn.Size = UDim2.new(0.5, -4, 1, 0)
-startFlingBtn.Position = UDim2.new(0, 0, 0, 0)
 startFlingBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 0)
 startFlingBtn.Text = "START FLING"
 startFlingBtn.TextColor3 = Color3.new(1, 1, 1)
@@ -1128,7 +1068,6 @@ selBtnRow.Parent = trollTab
 
 local selectAllBtn = Instance.new("TextButton")
 selectAllBtn.Size = UDim2.new(0.5, -4, 1, 0)
-selectAllBtn.Position = UDim2.new(0, 0, 0, 0)
 selectAllBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
 selectAllBtn.Text = "SELECT ALL"
 selectAllBtn.TextColor3 = Color3.new(1, 1, 1)
@@ -1146,39 +1085,23 @@ deselectAllBtn.Font = Enum.Font.Gotham
 deselectAllBtn.TextSize = 12
 deselectAllBtn.Parent = selBtnRow
 
-startFlingBtn.MouseButton1Click:Connect(function()
-    startFlingLoop()
-    refreshTrollStatus()
-end)
-stopFlingBtn.MouseButton1Click:Connect(function()
-    stopFlingLoop()
-    refreshTrollStatus()
-end)
+startFlingBtn.MouseButton1Click:Connect(function() startFlingLoop(); refreshTrollStatus() end)
+stopFlingBtn.MouseButton1Click:Connect(function() stopFlingLoop(); refreshTrollStatus() end)
 selectAllBtn.MouseButton1Click:Connect(function()
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer then Config.Troll.SelectedTargets[p.Name] = p end
     end
-    refreshTrollList()
-    refreshTrollStatus()
-    SaveSettings()
+    refreshTrollList(); refreshTrollStatus(); SaveSettings()
 end)
 deselectAllBtn.MouseButton1Click:Connect(function()
     Config.Troll.SelectedTargets = {}
-    refreshTrollList()
-    refreshTrollStatus()
-    SaveSettings()
+    refreshTrollList(); refreshTrollStatus(); SaveSettings()
 end)
 
-Players.PlayerAdded:Connect(function()
-    task.wait(0.5)
-    refreshTrollList()
-    refreshTrollStatus()
-end)
+Players.PlayerAdded:Connect(function() task.wait(0.5); refreshTrollList(); refreshTrollStatus() end)
 Players.PlayerRemoving:Connect(function(p)
     Config.Troll.SelectedTargets[p.Name] = nil
-    task.wait(0.3)
-    refreshTrollList()
-    refreshTrollStatus()
+    task.wait(0.3); refreshTrollList(); refreshTrollStatus()
 end)
 
 UI:CreateLabel(trollTab, " ")
@@ -1192,26 +1115,15 @@ UI:CreateLabel(miscTab, "Visuals & Misc")
 UI:CreateToggle(miscTab, "FullBright", Config.Visuals.FullBright, function(v)
     Config.Visuals.FullBright = v
     if v then
-        Lighting.Brightness = 2
-        Lighting.ClockTime = 14
-        Lighting.FogEnd = 100000
-        Lighting.GlobalShadows = false
-        Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
+        Lighting.Brightness = 2; Lighting.ClockTime = 14; Lighting.FogEnd = 100000
+        Lighting.GlobalShadows = false; Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
     else
-        Lighting.Brightness = 1
-        Lighting.ClockTime = 14
-        Lighting.FogEnd = 1000
+        Lighting.Brightness = 1; Lighting.ClockTime = 14; Lighting.FogEnd = 1000
         Lighting.GlobalShadows = true
     end
 end)
-UI:CreateToggle(miscTab, "Anti Fling", Config.Visuals.AntiFling, function(v)
-    Config.Visuals.AntiFling = v
-    toggleAntiFling(v)
-end)
-UI:CreateToggle(miscTab, "Anti Void", Config.Visuals.AntiVoid, function(v)
-    Config.Visuals.AntiVoid = v
-    toggleAntiVoid(v)
-end)
+UI:CreateToggle(miscTab, "Anti Fling", Config.Visuals.AntiFling, function(v) Config.Visuals.AntiFling = v; toggleAntiFling(v) end)
+UI:CreateToggle(miscTab, "Anti Void", Config.Visuals.AntiVoid, function(v) Config.Visuals.AntiVoid = v; toggleAntiVoid(v) end)
 UI:CreateLabel(miscTab, " ")
 UI:CreateLabel(miscTab, "Danger Zone")
 
@@ -1234,11 +1146,8 @@ UI:CreateButton(miscTab, "Kill Script (Unload)", function()
 end)
 
 if Config.Visuals.FullBright then
-    Lighting.Brightness = 2
-    Lighting.ClockTime = 14
-    Lighting.FogEnd = 100000
-    Lighting.GlobalShadows = false
-    Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
+    Lighting.Brightness = 2; Lighting.ClockTime = 14; Lighting.FogEnd = 100000
+    Lighting.GlobalShadows = false; Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
 end
 if Config.Movement.TeleportSpawn then createSpawnBarrier() end
 if Config.Helper.TriggerTraps then startTrapTrigger() end
@@ -1457,7 +1366,7 @@ local function shootAtVector3(targetVector3)
     end
 end
 
--- ===================== NAV UTILITIES =====================
+-- ===================== NAV UTILITIES (shared by both autoplays) =====================
 local function isDirectLineClear(fromPos, toPos, ignoreChar)
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -1497,43 +1406,6 @@ local function makeSyntheticDirectPath(fromPos, toPos)
             }
         end
     }
-end
-
--- ===================== AUTO PLAY (MURDERER CHASE) =====================
-local AutoPlayActive = false
-local autoPlayConnection = nil
-local currentPath = nil
-local currentWaypoints = {}
-local currentWaypointIndex = 1
-local lastPathTargetPos = nil
-local lastPathAttempt = 0
-local lastPathFailed = false
-local lastFailedTargetPos = nil
-local PATH_RETRY_COOLDOWN = 0.5
-local FAILED_RETRY_COOLDOWN = 2.0
-local ATTACK_DISTANCE = 5
-local PATH_RECOMPUTE_TARGET_DELTA = 10
-local MIN_DIRECT_CHASE_DIST = 6
-local MAX_LOOKAHEAD_DIST = 40
-local LOOKAHEAD_STEPS = 5
-local JUMP_PROXIMITY = 6
-local stuckCheckPos = nil
-local stuckCheckTime = 0
-local stuckCounter = 0
-local lastJumpTime = 0
-
-local function stopAutoPlay()
-    AutoPlayActive = false
-    if autoPlayConnection then autoPlayConnection:Disconnect(); autoPlayConnection = nil end
-    currentPath = nil
-    currentWaypoints = {}
-    currentWaypointIndex = 1
-    lastPathTargetPos = nil
-    lastPathAttempt = 0
-    lastPathFailed = false
-    lastFailedTargetPos = nil
-    stuckCheckPos = nil
-    stuckCounter = 0
 end
 
 local function computePathTo(fromPos, toPos)
@@ -1578,10 +1450,156 @@ local function findClimbableNear(char, centerPos, radius, minY, maxY)
     return best
 end
 
+-- ===================== UNIFIED PATH EXECUTION =====================
+-- Walks a humanoid along a waypoint list with jump-aware advance, proactive
+-- jumping, LOS look-ahead, and ladder/climb handling.
+-- Returns:
+--   "walking"     — still has waypoints to consume
+--   "arrived"     — consumed all waypoints
+--   "stuck"       — (out param) waypoint index unchanged for too long
+local pathState = {
+    currentPath = nil,
+    currentWaypoints = {},
+    currentWaypointIndex = 1,
+    lastJumpTime = 0,
+    lastSteerIdx = 0,
+    sameSteerCount = 0,
+    lastSteerCheck = 0,
+}
+
+local function resetPathState()
+    pathState.currentPath = nil
+    pathState.currentWaypoints = {}
+    pathState.currentWaypointIndex = 1
+    pathState.lastSteerIdx = 0
+    pathState.sameSteerCount = 0
+    pathState.lastSteerCheck = 0
+end
+
+local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, now)
+    local myPos = myRoot.Position
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = {char}
+    local eyePos = myPos + Vector3.new(0, 2.5, 0)
+
+    -- Advance past reached waypoints (jump-aware)
+    while waypointIndex <= #waypoints do
+        local wp = waypoints[waypointIndex]
+        local diff = myPos - wp.Position
+        local horiz = Vector3.new(diff.X, 0, diff.Z).Magnitude
+        local vert = math.abs(diff.Y)
+        if wp.Action == Enum.PathWaypointAction.Jump then
+            local alreadyJumped = (now - pathState.lastJumpTime) < 0.6
+            if alreadyJumped and (myPos.Y >= wp.Position.Y - 2 or horiz <= 2) then
+                waypointIndex = waypointIndex + 1
+            else
+                break
+            end
+        else
+            local tol = 3
+            local vertTol = 5
+            if horiz <= tol and vert <= vertTol then
+                waypointIndex = waypointIndex + 1
+            else
+                break
+            end
+        end
+    end
+
+    if waypointIndex > #waypoints then
+        return "arrived", waypointIndex
+    end
+
+    -- Proactive jump
+    for i = waypointIndex, math.min(waypointIndex + 1, #waypoints) do
+        local wp = waypoints[i]
+        if wp.Action == Enum.PathWaypointAction.Jump then
+            local horizDist = Vector3.new(wp.Position.X - myPos.X, 0, wp.Position.Z - myPos.Z).Magnitude
+            if horizDist <= 6 and (now - pathState.lastJumpTime) > 0.4 then
+                hum.Jump = true
+                pathState.lastJumpTime = now
+            end
+            break
+        end
+    end
+
+    -- LOS look-ahead
+    local steerIdx = waypointIndex
+    for i = waypointIndex + 1, math.min(waypointIndex + 5, #waypoints) do
+        local prevWp = waypoints[i - 1]
+        local wp = waypoints[i]
+        if wp.Action == Enum.PathWaypointAction.Jump then break end
+        if prevWp.Action == Enum.PathWaypointAction.Jump then break end
+        if (wp.Position - myPos).Magnitude > 40 then break end
+        if math.abs(wp.Position.Y - myPos.Y) > 6 then break end
+        local wpEye = wp.Position + Vector3.new(0, 2.5, 0)
+        if workspace:Raycast(eyePos, wpEye - eyePos, rayParams) then break end
+        steerIdx = i
+    end
+
+    -- Ladder/climb handling
+    local nextWp = waypoints[steerIdx]
+    local climbGap = nextWp.Position.Y - myPos.Y
+    if climbGap > 5 then
+        local overlapParams = OverlapParams.new()
+        overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+        overlapParams.FilterDescendantsInstances = {char}
+        local parts = workspace:GetPartBoundsInRadius(
+            myPos + Vector3.new(0, climbGap * 0.5, 0),
+            8, overlapParams
+        )
+        local foundLadder = false
+        for _, part in ipairs(parts) do
+            local n = string.lower(part.Name)
+            if n:find("ladder") or n:find("truss") or n:find("climb") then
+                foundLadder = true
+                break
+            end
+        end
+        if foundLadder and hum:GetState() ~= Enum.HumanoidStateType.Climbing then
+            hum:MoveTo(nextWp.Position)
+            hum:ChangeState(Enum.HumanoidStateType.Climbing)
+            return "walking", waypointIndex
+        end
+    end
+
+    hum:MoveTo(waypoints[steerIdx].Position)
+    return "walking", waypointIndex
+end
+
+-- ===================== AUTO PLAY (MURDERER CHASE) =====================
+local AutoPlayActive = false
+local autoPlayConnection = nil
+local PATH_RETRY_COOLDOWN = 0.5
+local FAILED_RETRY_COOLDOWN = 2.0
+local ATTACK_DISTANCE = 5
+local PATH_RECOMPUTE_TARGET_DELTA = 10
+local MIN_DIRECT_CHASE_DIST = 6
+local stuckCheckPos = nil
+local stuckCheckTime = 0
+local stuckCounter = 0
+local lastPathTargetPos = nil
+local lastPathAttempt = 0
+local lastPathFailed = false
+local lastFailedTargetPos = nil
+
+local function stopAutoPlay()
+    AutoPlayActive = false
+    if autoPlayConnection then autoPlayConnection:Disconnect(); autoPlayConnection = nil end
+    resetPathState()
+    lastPathTargetPos = nil
+    lastPathAttempt = 0
+    lastPathFailed = false
+    lastFailedTargetPos = nil
+    stuckCheckPos = nil
+    stuckCounter = 0
+end
+
 local function shouldRecomputePath(targetPos)
-    if not currentPath then return true end
-    if #currentWaypoints < 2 then return true end
-    if currentWaypointIndex > #currentWaypoints then return true end
+    if not pathState.currentPath then return true end
+    if #pathState.currentWaypoints < 2 then return true end
+    if pathState.currentWaypointIndex > #pathState.currentWaypoints then return true end
     if not lastPathTargetPos then return true end
     local delta = targetPos - lastPathTargetPos
     if delta.Magnitude > PATH_RECOMPUTE_TARGET_DELTA then return true end
@@ -1609,7 +1627,6 @@ local function startMurdererAutoPlay()
         hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
 
         local myPos = myRoot.Position
-
         local target = nil
         local nearest = math.huge
         for _, player in pairs(Players:GetPlayers()) do
@@ -1633,9 +1650,7 @@ local function startMurdererAutoPlay()
                 if knife.Parent ~= char then hum:EquipTool(knife) end
                 knife:Activate()
             end
-            currentPath = nil
-            currentWaypoints = {}
-            currentWaypointIndex = 1
+            resetPathState()
             lastPathTargetPos = nil
             return
         end
@@ -1652,7 +1667,6 @@ local function startMurdererAutoPlay()
         local targetEyePos = targetPos + Vector3.new(0, 2.5, 0)
         local hit = workspace:Raycast(eyePos, targetEyePos - eyePos, rayParams)
         local targetVisible = (hit == nil)
-
         local sameLevel = verticalGap < 8
         local canDirectChase = targetVisible and sameLevel and stuckCounter < 2
             and distanceToTarget >= MIN_DIRECT_CHASE_DIST
@@ -1673,9 +1687,7 @@ local function startMurdererAutoPlay()
 
         if canDirectChase then
             hum:MoveTo(targetPos)
-            currentPath = nil
-            currentWaypoints = {}
-            currentWaypointIndex = 1
+            resetPathState()
             lastPathTargetPos = nil
             return
         end
@@ -1685,9 +1697,7 @@ local function startMurdererAutoPlay()
         if verticalGap > 8 then
             local midY = (myPos.Y + targetPos.Y) * 0.5
             local center = Vector3.new(
-                (myPos.X + targetPos.X) * 0.5,
-                midY,
-                (myPos.Z + targetPos.Z) * 0.5
+                (myPos.X + targetPos.X) * 0.5, midY, (myPos.Z + targetPos.Z) * 0.5
             )
             local climbPart = findClimbableNear(char, center, 40, myPos.Y - 5, targetPos.Y + 5)
             if climbPart then
@@ -1718,9 +1728,9 @@ local function startMurdererAutoPlay()
                 end
             end
             if newPath then
-                currentPath = newPath
-                currentWaypoints = wpsOrNil
-                currentWaypointIndex = 2
+                pathState.currentPath = newPath
+                pathState.currentWaypoints = wpsOrNil
+                pathState.currentWaypointIndex = 2
                 lastPathTargetPos = pathGoal
                 stuckCounter = 0
                 lastPathFailed = false
@@ -1749,98 +1759,25 @@ local function startMurdererAutoPlay()
             end
         end
 
-        if not currentPath or #currentWaypoints < 2 then return end
+        if not pathState.currentPath or #pathState.currentWaypoints < 2 then return end
 
-        while currentWaypointIndex <= #currentWaypoints do
-            local wp = currentWaypoints[currentWaypointIndex]
-            local diff = myPos - wp.Position
-            local horiz = Vector3.new(diff.X, 0, diff.Z).Magnitude
-            local vert = math.abs(diff.Y)
-            if wp.Action == Enum.PathWaypointAction.Jump then
-                local alreadyJumped = (now - lastJumpTime) < 0.6
-                if alreadyJumped and (myPos.Y >= wp.Position.Y - 2 or horiz <= 2) then
-                    currentWaypointIndex = currentWaypointIndex + 1
-                else
-                    break
-                end
-            else
-                if horiz <= 3 and vert <= 5 then
-                    currentWaypointIndex = currentWaypointIndex + 1
-                else
-                    break
-                end
-            end
-        end
+        local status, newIdx = executeWaypointPath(
+            char, hum, myRoot,
+            pathState.currentWaypoints, pathState.currentWaypointIndex, now
+        )
+        pathState.currentWaypointIndex = newIdx
 
-        if currentWaypointIndex > #currentWaypoints then
+        if status == "arrived" then
             if canReachDirectly(myPos, targetPos, char) then hum:MoveTo(targetPos) end
+            resetPathState()
             return
         end
-
-        local shouldJumpNow = false
-        for i = currentWaypointIndex, math.min(currentWaypointIndex + 1, #currentWaypoints) do
-            local wp = currentWaypoints[i]
-            if wp.Action == Enum.PathWaypointAction.Jump then
-                local horizDist = Vector3.new(
-                    wp.Position.X - myPos.X, 0, wp.Position.Z - myPos.Z
-                ).Magnitude
-                if horizDist <= JUMP_PROXIMITY then shouldJumpNow = true end
-                break
-            end
-        end
-        if shouldJumpNow and (now - lastJumpTime) > 0.4 then
-            hum.Jump = true
-            lastJumpTime = now
-        end
-
-        local steerIdx = currentWaypointIndex
-        for i = currentWaypointIndex + 1, math.min(currentWaypointIndex + LOOKAHEAD_STEPS, #currentWaypoints) do
-            local prevWp = currentWaypoints[i - 1]
-            local wp = currentWaypoints[i]
-            if wp.Action == Enum.PathWaypointAction.Jump then break end
-            if prevWp.Action == Enum.PathWaypointAction.Jump then break end
-            if (wp.Position - myPos).Magnitude > MAX_LOOKAHEAD_DIST then break end
-            if math.abs(wp.Position.Y - myPos.Y) > 6 then break end
-            local wpEye = wp.Position + Vector3.new(0, 2.5, 0)
-            if workspace:Raycast(eyePos, wpEye - eyePos, rayParams) then break end
-            steerIdx = i
-        end
-
-        local nextWp = currentWaypoints[steerIdx]
-        local climbGap = nextWp.Position.Y - myPos.Y
-        if climbGap > 5 then
-            local overlapParams = OverlapParams.new()
-            overlapParams.FilterType = Enum.RaycastFilterType.Exclude
-            overlapParams.FilterDescendantsInstances = {char}
-            local parts = workspace:GetPartBoundsInRadius(
-                myPos + Vector3.new(0, climbGap * 0.5, 0),
-                8, overlapParams
-            )
-            local foundLadder = false
-            for _, part in ipairs(parts) do
-                local n = string.lower(part.Name)
-                if n:find("ladder") or n:find("truss") or n:find("climb") then
-                    foundLadder = true
-                    break
-                end
-            end
-            if foundLadder and hum:GetState() ~= Enum.HumanoidStateType.Climbing then
-                hum:MoveTo(nextWp.Position)
-                hum:ChangeState(Enum.HumanoidStateType.Climbing)
-                return
-            end
-        end
-
-        hum:MoveTo(currentWaypoints[steerIdx].Position)
     end)
 end
 
 -- ===================== INNOCENT EVADE AUTO PLAY =====================
 local InnocentActive = false
 local innocentConnection = nil
-local innPath = nil
-local innWaypoints = {}
-local innWaypointIndex = 1
 local innLastRepath = 0
 local innTargetSafePos = nil
 local innLastPos = nil
@@ -1856,18 +1793,21 @@ local INN_MAX_PATH_DETOUR_RATIO = 3.0
 local INN_BLACKLIST_DURATION = 4.0
 local INN_PROGRESS_CHECK_INTERVAL = 0.8
 local INN_PROGRESS_MIN_DIST = 3.0
-local innLastJumpTime = 0
+local INN_PATH_RETRY_COOLDOWN = 1.0
+local INN_FAILED_RETRY_COOLDOWN = 2.0
+local innLastPathAttempt = 0
+local innPathFailed = false
 
 local function stopInnocentAutoPlay()
     InnocentActive = false
     if innocentConnection then innocentConnection:Disconnect(); innocentConnection = nil end
-    innPath = nil
-    innWaypoints = {}
-    innWaypointIndex = 1
+    resetPathState()
     innTargetSafePos = nil
     innLastPos = nil
     innLastProgressCheck = 0
     innBlacklist = {}
+    innLastPathAttempt = 0
+    innPathFailed = false
 end
 
 local function hasLineOfSight(fromPos, toPos, ignoreChar)
@@ -1917,36 +1857,25 @@ end
 
 local function scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
     if isBlacklisted(cand) then return -math.huge end
-
     local distFromMurderer = (cand - murdererPos).Magnitude
     local distFromMe = (cand - myPos).Magnitude
     local score = distFromMurderer
-
     local murdererEye = murdererPos + Vector3.new(0, 2.5, 0)
     local candEye = cand + Vector3.new(0, 2.5, 0)
-    local visibleToMurderer = hasLineOfSight(murdererEye, candEye, murdererChar)
-    if visibleToMurderer then score = score - 30 end
-
+    if hasLineOfSight(murdererEye, candEye, murdererChar) then score = score - 30 end
     score = score - distFromMe * 0.3
     if distFromMe < 25 then score = score + 15 end
     if math.abs(cand.Y - myPos.Y) > 10 then score = score - 20 end
-
     local escapeRoutes = countEscapeRoutes(cand, 10, myChar, murdererChar)
-    if escapeRoutes <= 1 then
-        score = score - 60
-    elseif escapeRoutes == 2 then
-        score = score - 10
-    elseif escapeRoutes >= 4 then
-        score = score + 15
-    end
-
+    if escapeRoutes <= 1 then score = score - 60
+    elseif escapeRoutes == 2 then score = score - 10
+    elseif escapeRoutes >= 4 then score = score + 15 end
     return score
 end
 
 local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
     local searchRadius = (myPos - murdererPos).Magnitude < INN_DANGER_RADIUS and 40 or 100
     local candidates = {}
-
     for dx = -searchRadius, searchRadius, INN_CANDIDATE_GRID do
         for dz = -searchRadius, searchRadius, INN_CANDIDATE_GRID do
             if #candidates >= INN_MAX_CANDIDATES then break end
@@ -1963,20 +1892,16 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
             end
         end
     end
-
     if #candidates == 0 then
         local awayDir = (myPos - murdererPos)
         awayDir = Vector3.new(awayDir.X, 0, awayDir.Z)
         if awayDir.Magnitude < 0.5 then awayDir = Vector3.new(1, 0, 0) end
         return myPos + awayDir.Unit * 30
     end
-
     local scored = {}
     for _, cand in ipairs(candidates) do
         local s = scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
-        if s > -math.huge then
-            table.insert(scored, {pos = cand, score = s})
-        end
+        if s > -math.huge then table.insert(scored, {pos = cand, score = s}) end
     end
     if #scored == 0 then
         local awayDir = (myPos - murdererPos)
@@ -1985,12 +1910,10 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
         return myPos + awayDir.Unit * 30
     end
     table.sort(scored, function(a, b) return a.score > b.score end)
-
     for i = 1, math.min(5, #scored) do
         local cand = scored[i].pos
         local straightDist = (cand - myPos).Magnitude
-        if straightDist < 5 then return cand end
-
+        if straightDist < 5 then return cand, nil, nil end
         local testPath, testWps = computePathTo(myPos, cand)
         if not testPath then
             if canReachDirectly(myPos, cand, myChar) then
@@ -2004,24 +1927,19 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
                 pathLen = pathLen + (testWps[j].Position - testWps[j-1].Position).Magnitude
             end
             if pathLen <= straightDist * INN_MAX_PATH_DETOUR_RATIO then
-                innPath = testPath
-                innWaypoints = testWps
-                return cand
+                return cand, testPath, testWps
             else
                 blacklistPos(cand)
             end
         end
     end
-
-    innPath = nil
-    innWaypoints = {}
-    return scored[1].pos
+    return scored[1].pos, nil, nil
 end
 
 local function startInnocentAutoPlay()
     if innocentConnection then return end
     InnocentActive = true
-    Notify("Innocent Auto", "Evading (dead-end + secret-passage aware)", 3)
+    Notify("Innocent Auto", "Evading (unified nav)", 3)
 
     innocentConnection = RunService.Heartbeat:Connect(function()
         if not InnocentActive then return end
@@ -2046,29 +1964,25 @@ local function startInnocentAutoPlay()
         if not murdererRoot then return end
         local murdererPos = murdererRoot.Position
         local distToMurderer = (myPos - murdererPos).Magnitude
-
         local murdererEye = murdererPos + Vector3.new(0, 2.5, 0)
         local myEye = myPos + Vector3.new(0, 2.5, 0)
         local murdererCanSeeMe = hasLineOfSight(murdererEye, myEye, murdererChar)
 
         if distToMurderer > INN_IDLE_RADIUS and not murdererCanSeeMe then
             hum:Move(Vector3.zero)
-            innPath = nil
-            innWaypoints = {}
-            innWaypointIndex = 1
+            resetPathState()
             return
         end
 
         local now = tick()
 
+        -- Progress watchdog
         if innLastPos and innTargetSafePos then
             if (now - innLastProgressCheck) >= INN_PROGRESS_CHECK_INTERVAL then
                 if (myPos - innLastPos).Magnitude < INN_PROGRESS_MIN_DIST then
                     blacklistPos(innTargetSafePos)
                     innTargetSafePos = nil
-                    innPath = nil
-                    innWaypoints = {}
-                    innWaypointIndex = 1
+                    resetPathState()
                     innLastRepath = 0
                 end
                 innLastPos = myPos
@@ -2082,12 +1996,28 @@ local function startInnocentAutoPlay()
         local needRepath = (now - innLastRepath) >= INN_REPATH_INTERVAL
         local inDanger = distToMurderer < INN_DANGER_RADIUS or murdererCanSeeMe
 
-        if needRepath or (inDanger and (not innTargetSafePos or (innTargetSafePos - myPos).Magnitude < 8)) then
+        -- Retry backoff (mirrors murderer autoplay)
+        local canAttemptPath
+        if innPathFailed then
+            canAttemptPath = (now - innLastPathAttempt) >= INN_FAILED_RETRY_COOLDOWN
+        else
+            canAttemptPath = (now - innLastPathAttempt) >= INN_PATH_RETRY_COOLDOWN
+        end
+
+        if (needRepath or (inDanger and (not innTargetSafePos or (innTargetSafePos - myPos).Magnitude < 8)))
+            and canAttemptPath then
+            innLastPathAttempt = now
             innLastRepath = now
-            local safePos = findSafestCandidate(myPos, murdererPos, char, murdererChar)
+            local safePos, testPath, testWps = findSafestCandidate(myPos, murdererPos, char, murdererChar)
             if safePos then
                 innTargetSafePos = safePos
-                if not innPath or #innWaypoints < 2 then
+                if testPath and testWps then
+                    pathState.currentPath = testPath
+                    pathState.currentWaypoints = testWps
+                    pathState.currentWaypointIndex = 2
+                    innPathFailed = false
+                else
+                    innPathFailed = true
                     if canReachDirectly(myPos, safePos, char) then
                         hum:MoveTo(safePos)
                     else
@@ -2097,59 +2027,28 @@ local function startInnocentAutoPlay()
                     end
                     return
                 end
-                innWaypointIndex = 2
             end
         end
 
-        if not innPath or #innWaypoints < 2 then
+        if not pathState.currentPath or #pathState.currentWaypoints < 2 then
             if innTargetSafePos and canReachDirectly(myPos, innTargetSafePos, char) then
                 hum:MoveTo(innTargetSafePos)
             end
             return
         end
 
-        while innWaypointIndex <= #innWaypoints do
-            local wp = innWaypoints[innWaypointIndex]
-            local diff = myPos - wp.Position
-            local horiz = Vector3.new(diff.X, 0, diff.Z).Magnitude
-            local vert = math.abs(diff.Y)
-            if wp.Action == Enum.PathWaypointAction.Jump then
-                local alreadyJumped = (now - innLastJumpTime) < 0.6
-                if alreadyJumped and (myPos.Y >= wp.Position.Y - 2 or horiz <= 2) then
-                    innWaypointIndex = innWaypointIndex + 1
-                else
-                    break
-                end
-            else
-                if horiz <= 3 and vert <= 5 then
-                    innWaypointIndex = innWaypointIndex + 1
-                else
-                    break
-                end
-            end
-        end
+        local status, newIdx = executeWaypointPath(
+            char, hum, myRoot,
+            pathState.currentWaypoints, pathState.currentWaypointIndex, now
+        )
+        pathState.currentWaypointIndex = newIdx
 
-        if innWaypointIndex > #innWaypoints then
+        if status == "arrived" then
+            -- Reached safe spot. Clear so next repath picks a new one.
             innTargetSafePos = nil
-            innPath = nil
-            innWaypoints = {}
-            innWaypointIndex = 1
+            resetPathState()
             return
         end
-
-        for i = innWaypointIndex, math.min(innWaypointIndex + 1, #innWaypoints) do
-            local wp = innWaypoints[i]
-            if wp.Action == Enum.PathWaypointAction.Jump then
-                local horizDist = Vector3.new(wp.Position.X - myPos.X, 0, wp.Position.Z - myPos.Z).Magnitude
-                if horizDist <= 6 and (now - innLastJumpTime) > 0.4 then
-                    hum.Jump = true
-                    innLastJumpTime = now
-                end
-                break
-            end
-        end
-
-        hum:MoveTo(innWaypoints[innWaypointIndex].Position)
     end)
 end
 
@@ -2388,5 +2287,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.9.0 - multi-target fling + nav fixes", 5)
-warn("[MM2] v4.9.0 ready")
+Notify("MM2 Script", "Loaded! v4.9.1 - unified nav for both autoplays", 5)
+warn("[MM2] v4.9.1 ready")

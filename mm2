@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.8.0  (innocent evade autoplayer + all v4.7.2 nav fixes)
+    Version: 4.8.1  (innocent evade with dead-end avoidance)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -319,7 +319,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.8.0"
+    title.Text = "MM2 Script  -  v4.8.1"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -1523,7 +1523,7 @@ local function startMurdererAutoPlay()
     end)
 end
 
--- ===================== INNOCENT EVADE AUTO PLAY =====================
+-- ===================== INNOCENT EVADE AUTO PLAY (DEAD-END AWARE) =====================
 local InnocentActive = false
 local innocentConnection = nil
 local innPath = nil
@@ -1531,14 +1531,21 @@ local innWaypoints = {}
 local innWaypointIndex = 1
 local innLastRepath = 0
 local innTargetSafePos = nil
+local innCurrentPathLen = 0
+local innLastPos = nil
+local innLastProgressCheck = 0
+local innBlacklist = {}   -- {pos = Vector3, expires = tick()}
 local INN_REPATH_INTERVAL = 0.8
 local INN_FLEE_RADIUS = 15
 local INN_DANGER_RADIUS = 60
 local INN_IDLE_RADIUS = 100
 local INN_CANDIDATE_GRID = 20
 local INN_MAX_CANDIDATES = 120
+local INN_MAX_PATH_DETOUR_RATIO = 3.0
+local INN_BLACKLIST_DURATION = 4.0
+local INN_PROGRESS_CHECK_INTERVAL = 0.8
+local INN_PROGRESS_MIN_DIST = 3.0
 local innLastJumpTime = 0
-local innLastSafeMove = 0
 
 local function stopInnocentAutoPlay()
     InnocentActive = false
@@ -1547,7 +1554,9 @@ local function stopInnocentAutoPlay()
     innWaypoints = {}
     innWaypointIndex = 1
     innTargetSafePos = nil
-    innLastRepath = 0
+    innLastPos = nil
+    innLastProgressCheck = 0
+    innBlacklist = {}
 end
 
 local function hasLineOfSight(fromPos, toPos, ignoreChar)
@@ -1558,15 +1567,53 @@ local function hasLineOfSight(fromPos, toPos, ignoreChar)
     return result == nil
 end
 
--- Score a candidate position: higher = safer
+-- Count how many of 8 compass directions are open from a position.
+-- Dead ends have 1, corridors have 2, open rooms have 3+.
+local function countEscapeRoutes(pos, radius, ignoreChar, murdererChar)
+    local dirs = {
+        Vector3.new(1,0,0), Vector3.new(-1,0,0),
+        Vector3.new(0,0,1), Vector3.new(0,0,-1),
+        Vector3.new(0.707,0,0.707), Vector3.new(-0.707,0,0.707),
+        Vector3.new(0.707,0,-0.707), Vector3.new(-0.707,0,-0.707),
+    }
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {ignoreChar, murdererChar, Camera}
+    local count = 0
+    local startPos = pos + Vector3.new(0, 2.5, 0)
+    for _, dir in ipairs(dirs) do
+        local hit = workspace:Raycast(startPos, dir * radius, params)
+        if not hit then count = count + 1 end
+    end
+    return count
+end
+
+local function isBlacklisted(pos)
+    local now = tick()
+    for i = #innBlacklist, 1, -1 do
+        local entry = innBlacklist[i]
+        if now > entry.expires then
+            table.remove(innBlacklist, i)
+        elseif (entry.pos - pos).Magnitude < 10 then
+            return true
+        end
+    end
+    return false
+end
+
+local function blacklistPos(pos)
+    table.insert(innBlacklist, {pos = pos, expires = tick() + INN_BLACKLIST_DURATION})
+    if #innBlacklist > 8 then table.remove(innBlacklist, 1) end
+end
+
+-- Score a candidate position: higher = safer. Now includes escape-route count.
 local function scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
+    if isBlacklisted(cand) then return -math.huge end
+
     local distFromMurderer = (cand - murdererPos).Magnitude
     local distFromMe = (cand - myPos).Magnitude
-
-    -- Base score = distance from murderer
     local score = distFromMurderer
 
-    -- Big penalty if murderer can see the candidate
     local murdererEye = murdererPos + Vector3.new(0, 2.5, 0)
     local candEye = cand + Vector3.new(0, 2.5, 0)
     local visibleToMurderer = hasLineOfSight(murdererEye, candEye, murdererChar)
@@ -1574,24 +1621,30 @@ local function scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
         score = score - 30
     end
 
-    -- Penalty for being too far from current position (harder to reach in time)
     score = score - distFromMe * 0.3
 
-    -- Bonus if candidate is very close to me (fast escape)
     if distFromMe < 25 then
         score = score + 15
     end
 
-    -- Penalty if candidate is on a different floor (harder to reach when panicking)
     if math.abs(cand.Y - myPos.Y) > 10 then
         score = score - 20
+    end
+
+    -- Escape route analysis — the big fix
+    local escapeRoutes = countEscapeRoutes(cand, 10, myChar, murdererChar)
+    if escapeRoutes <= 1 then
+        score = score - 60   -- dead end! strongly avoid
+    elseif escapeRoutes == 2 then
+        score = score - 10   -- corridor, okay but not great
+    elseif escapeRoutes >= 4 then
+        score = score + 15   -- open area, good escape potential
     end
 
     return score
 end
 
 local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
-    -- When murderer is close, only consider nearby candidates (fast escape)
     local searchRadius = (myPos - murdererPos).Magnitude < INN_DANGER_RADIUS and 40 or 100
     local candidates = {}
 
@@ -1599,14 +1652,12 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
         for dz = -searchRadius, searchRadius, INN_CANDIDATE_GRID do
             if #candidates >= INN_MAX_CANDIDATES then break end
             local cand = Vector3.new(myPos.X + dx, myPos.Y, myPos.Z + dz)
-            -- Reject candidates that go into empty space (no floor beneath)
             local rayParams = RaycastParams.new()
             rayParams.FilterType = Enum.RaycastFilterType.Exclude
             rayParams.FilterDescendantsInstances = {myChar, murdererChar}
             local groundHit = workspace:Raycast(cand + Vector3.new(0, 5, 0), Vector3.new(0, -50, 0), rayParams)
             if groundHit then
                 local groundedCand = Vector3.new(cand.X, groundHit.Position.Y, cand.Z)
-                -- Skip if too close to murderer
                 if (groundedCand - murdererPos).Magnitude > INN_FLEE_RADIUS then
                     table.insert(candidates, groundedCand)
                 end
@@ -1615,25 +1666,65 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
     end
 
     if #candidates == 0 then
-        -- Fallback: run directly away from murderer
         local awayDir = (myPos - murdererPos)
         awayDir = Vector3.new(awayDir.X, 0, awayDir.Z)
         if awayDir.Magnitude < 0.5 then awayDir = Vector3.new(1, 0, 0) end
         return myPos + awayDir.Unit * 30
     end
 
-    local best, bestScore = nil, -math.huge
+    -- Score all candidates and sort descending
+    local scored = {}
     for _, cand in ipairs(candidates) do
         local s = scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
-        if s > bestScore then best, bestScore = cand, s end
+        if s > -math.huge then
+            table.insert(scored, {pos = cand, score = s})
+        end
     end
-    return best
+    if #scored == 0 then
+        local awayDir = (myPos - murdererPos)
+        awayDir = Vector3.new(awayDir.X, 0, awayDir.Z)
+        if awayDir.Magnitude < 0.5 then awayDir = Vector3.new(1, 0, 0) end
+        return myPos + awayDir.Unit * 30
+    end
+    table.sort(scored, function(a, b) return a.score > b.score end)
+
+    -- Try top candidates in order; validate path length vs straight-line.
+    -- If path is >3x straight-line, it's a maze/dead-end trap — reject and try next.
+    for i = 1, math.min(5, #scored) do
+        local cand = scored[i].pos
+        local straightDist = (cand - myPos).Magnitude
+        if straightDist < 5 then
+            return cand   -- basically already there
+        end
+        local testPath, testWps = computePathTo(myPos, cand)
+        if testPath and testWps then
+            local pathLen = 0
+            for j = 2, #testWps do
+                pathLen = pathLen + (testWps[j].Position - testWps[j-1].Position).Magnitude
+            end
+            if pathLen <= straightDist * INN_MAX_PATH_DETOUR_RATIO then
+                -- This candidate has an efficient path AND decent score. Use it.
+                innPath = testPath
+                innWaypoints = testWps
+                innCurrentPathLen = pathLen
+                return cand
+            else
+                -- Detour too long — likely dead-end routing. Blacklist briefly.
+                blacklistPos(cand)
+            end
+        end
+    end
+
+    -- Nothing validated — fall back to top score, walk directly
+    innPath = nil
+    innWaypoints = {}
+    return scored[1].pos
 end
 
 local function startInnocentAutoPlay()
     if innocentConnection then return end
     InnocentActive = true
-    Notify("Innocent Auto", "Evading murderer", 3)
+    Notify("Innocent Auto", "Evading murderer (dead-end aware)", 3)
 
     innocentConnection = RunService.Heartbeat:Connect(function()
         if not InnocentActive then return end
@@ -1648,6 +1739,7 @@ local function startInnocentAutoPlay()
 
         if hum.WalkSpeed < 16 then hum.WalkSpeed = 16 end
         if hum.JumpPower < 50 then hum.JumpPower = 50 end
+        hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
 
         local myPos = myRoot.Position
         local murdererPlayer = Murder and Players:FindFirstChild(Murder)
@@ -1660,13 +1752,12 @@ local function startInnocentAutoPlay()
         local murdererPos = murdererRoot.Position
         local distToMurderer = (myPos - murdererPos).Magnitude
 
-        -- Idle if murderer is far and can't see us
         local murdererEye = murdererPos + Vector3.new(0, 2.5, 0)
         local myEye = myPos + Vector3.new(0, 2.5, 0)
         local murdererCanSeeMe = hasLineOfSight(murdererEye, myEye, murdererChar)
 
+        -- Idle when safe
         if distToMurderer > INN_IDLE_RADIUS and not murdererCanSeeMe then
-            -- Murderer far and blind to us: stand still, don't draw attention
             hum:Move(Vector3.zero)
             innPath = nil
             innWaypoints = {}
@@ -1675,7 +1766,27 @@ local function startInnocentAutoPlay()
         end
 
         local now = tick()
-        -- Repath on interval OR when we're in danger and need to move
+
+        -- Progress check: if we've been trying to move but haven't, blacklist current target
+        if innLastPos and innTargetSafePos then
+            if (now - innLastProgressCheck) >= INN_PROGRESS_CHECK_INTERVAL then
+                if (myPos - innLastPos).Magnitude < INN_PROGRESS_MIN_DIST then
+                    -- Stuck! Blacklist the current safe pos and force a repath
+                    blacklistPos(innTargetSafePos)
+                    innTargetSafePos = nil
+                    innPath = nil
+                    innWaypoints = {}
+                    innWaypointIndex = 1
+                    innLastRepath = 0   -- force immediate repath
+                end
+                innLastPos = myPos
+                innLastProgressCheck = now
+            end
+        else
+            innLastPos = myPos
+            innLastProgressCheck = now
+        end
+
         local needRepath = (now - innLastRepath) >= INN_REPATH_INTERVAL
         local inDanger = distToMurderer < INN_DANGER_RADIUS or murdererCanSeeMe
 
@@ -1684,25 +1795,20 @@ local function startInnocentAutoPlay()
             local safePos = findSafestCandidate(myPos, murdererPos, char, murdererChar)
             if safePos then
                 innTargetSafePos = safePos
-                -- Path to it
-                local newPath, wpsOrNil = computePathTo(myPos, safePos)
-                if newPath then
-                    innPath = newPath
-                    innWaypoints = wpsOrNil
-                    innWaypointIndex = 2
-                else
-                    -- Pathfind failed; walk directly toward safe spot
+                if not innPath or #innWaypoints < 2 then
                     hum:MoveTo(safePos)
                     return
                 end
+                innWaypointIndex = 2
             end
         end
 
         if not innPath or #innWaypoints < 2 then
+            if innTargetSafePos then hum:MoveTo(innTargetSafePos) end
             return
         end
 
-        -- Advance waypoints (jump-aware, same logic as murderer autoplay)
+        -- Advance waypoints (jump-aware)
         while innWaypointIndex <= #innWaypoints do
             local wp = innWaypoints[innWaypointIndex]
             local diff = myPos - wp.Position
@@ -1725,6 +1831,11 @@ local function startInnocentAutoPlay()
         end
 
         if innWaypointIndex > #innWaypoints then
+            -- Reached the target — clear it so we pick a new one
+            innTargetSafePos = nil
+            innPath = nil
+            innWaypoints = {}
+            innWaypointIndex = 1
             return
         end
 
@@ -1741,9 +1852,7 @@ local function startInnocentAutoPlay()
             end
         end
 
-        local wp = innWaypoints[innWaypointIndex]
-        hum:MoveTo(wp.Position)
-        innLastSafeMove = now
+        hum:MoveTo(innWaypoints[innWaypointIndex].Position)
     end)
 end
 
@@ -1775,7 +1884,6 @@ local function updateHelper()
     local localIsSheriff = (Sheriff == LocalPlayer.Name or Hero == LocalPlayer.Name)
     local localIsInnocent = not localIsMurderer and not localIsSheriff
 
-    -- Murderer auto-play (chase)
     if Config.Helper.AutoPlayer then
         if localIsMurderer then
             startMurdererAutoPlay()
@@ -1786,7 +1894,6 @@ local function updateHelper()
         stopAutoPlay()
     end
 
-    -- Innocent auto-play (evade)
     if Config.Helper.InnocentAutoPlayer then
         if localIsInnocent then
             startInnocentAutoPlay()
@@ -1992,5 +2099,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.8.0 - innocent evade + murderer chase", 5)
-warn("[MM2] v4.8.0 ready")
+Notify("MM2 Script", "Loaded! v4.8.1 - dead-end aware innocent evade", 5)
+warn("[MM2] v4.8.1 ready")

@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.7.0  (LOS look-ahead + direct chase + vertical navigation fixes)
+    Version: 4.7.1  (vertical nav + freeze fix + path retry cooldown)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -191,8 +191,16 @@ local function updateRoles()
     if not Murder or not Sheriff then updateRolesByItems() end
 end
 local function IsAlive(player)
+    -- FIX: only treat as dead with positive confirmation, else trust live health
     local data = roles[player.Name]
-    if data then return not data.Killed and not data.Dead end
+    if data and (data.Killed == true or data.Dead == true) then
+        return false
+    end
+    local char = player.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then return hum.Health > 0 end
+    end
     return true
 end
 local function getRole(player)
@@ -310,7 +318,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.7.0"
+    title.Text = "MM2 Script  -  v4.7.1"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -1180,13 +1188,15 @@ local function shootAtVector3(targetVector3)
     end
 end
 
--- ===================== AUTO PLAY (PATHFINDING - SMOOTH, WITH VERTICAL NAV) =====================
+-- ===================== AUTO PLAY (PATHFINDING - VERTICAL NAV + FREEZE FIX) =====================
 local AutoPlayActive = false
 local autoPlayConnection = nil
 local currentPath = nil
 local currentWaypoints = {}
 local currentWaypointIndex = 1
 local lastPathTargetPos = nil
+local lastPathAttempt = 0
+local PATH_RETRY_COOLDOWN = 0.5
 local ATTACK_DISTANCE = 5
 local PATH_RECOMPUTE_TARGET_DELTA = 10
 local MIN_DIRECT_CHASE_DIST = 6
@@ -1203,6 +1213,7 @@ local function stopAutoPlay()
     currentWaypoints = {}
     currentWaypointIndex = 1
     lastPathTargetPos = nil
+    lastPathAttempt = 0
     stuckCheckPos = nil
     stuckCounter = 0
 end
@@ -1268,8 +1279,8 @@ local function startMurdererAutoPlay()
             if dist < nearest then nearest = dist; target = player end
         end
 
+        -- FIX: never call MoveTo(myPos) — that freezes the humanoid. Just return.
         if not target then
-            hum:MoveTo(myPos)
             return
         end
 
@@ -1331,7 +1342,9 @@ local function startMurdererAutoPlay()
             return
         end
 
-        if shouldRecomputePath(targetPos) then
+        -- Pathfinding with retry cooldown
+        if shouldRecomputePath(targetPos) and (tick() - lastPathAttempt) >= PATH_RETRY_COOLDOWN then
+            lastPathAttempt = tick()
             local newPath, wpsOrNil = computePathTo(myPos, targetPos)
             if newPath then
                 currentPath = newPath
@@ -1340,13 +1353,44 @@ local function startMurdererAutoPlay()
                 lastPathTargetPos = targetPos
                 stuckCounter = 0
             else
-                hum:MoveTo(targetPos)
+                -- Pathfinding failed. Handle "target overhead" gracefully.
+                local horizDelta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
+                local horizDist = horizDelta.Magnitude
+                if horizDist < 8 then
+                    -- Target is straight up/down. Look for a ladder/truss near midpoint.
+                    local overlapParams = OverlapParams.new()
+                    overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+                    overlapParams.FilterDescendantsInstances = {char}
+                    local probePos = Vector3.new(
+                        targetPos.X,
+                        myPos.Y + (targetPos.Y - myPos.Y) * 0.5,
+                        targetPos.Z
+                    )
+                    local parts = workspace:GetPartBoundsInRadius(probePos, 20, overlapParams)
+                    local searchDir = nil
+                    for _, part in ipairs(parts) do
+                        local n = string.lower(part.Name)
+                        if n:find("ladder") or n:find("truss") or n:find("climb") then
+                            searchDir = Vector3.new(part.Position.X - myPos.X, 0, part.Position.Z - myPos.Z)
+                            break
+                        end
+                    end
+                    if searchDir and searchDir.Magnitude > 0.5 then
+                        hum:MoveTo(myPos + searchDir.Unit * 5)
+                    else
+                        -- No ladder found. Release control so player can navigate.
+                        hum:Move(Vector3.zero)
+                    end
+                else
+                    -- Horizontally offset — walk to their XZ position (below them).
+                    hum:MoveTo(Vector3.new(targetPos.X, myPos.Y, targetPos.Z))
+                end
+                lastPathTargetPos = targetPos
                 return
             end
         end
 
         if not currentPath or #currentWaypoints < 2 then
-            hum:MoveTo(targetPos)
             return
         end
 
@@ -1370,7 +1414,7 @@ local function startMurdererAutoPlay()
             return
         end
 
-        -- Look-ahead that respects jump waypoints
+        -- Look-ahead that respects jump/climb waypoints
         local steerIdx = currentWaypointIndex
         for i = currentWaypointIndex + 1, math.min(currentWaypointIndex + LOOKAHEAD_STEPS, #currentWaypoints) do
             local prevWp = currentWaypoints[i - 1]
@@ -1653,5 +1697,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.7.0 - vertical navigation fixes", 5)
-warn("[MM2] v4.7.0 ready")
+Notify("MM2 Script", "Loaded! v4.7.1 - vertical nav + freeze fix", 5)
+warn("[MM2] v4.7.1 ready")

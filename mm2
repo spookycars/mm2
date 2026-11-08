@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.8.2  (wall-clip detection + secret-passage nav)
+    Version: 4.9.0  (KILASIK multi-target fling + wall-clip/secret-passage nav)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -82,12 +82,14 @@ local function SaveSettings()
     data.SpectateMurderer = Config.Helper.SpectateMurderer
     data.AutoShootMurderer = Config.Combat.AutoShootMurderer
     data.NotifyMurdererPerk = Config.ESP.NotifyMurdererPerk
-    data.TrollSelected = Config.Troll.Selected and Config.Troll.Selected.Name or nil
-    data.FlingEnabled = Config.Troll.FlingEnabled
     data.LoopGoToEnabled = Config.Troll.LoopGoToEnabled
     data.TriggerTraps = Config.Helper.TriggerTraps
     data.GunESP = Config.ESP.GunESP
     data.InnocentAutoPlayer = Config.Helper.InnocentAutoPlayer
+    -- Multi-target fling selections
+    local flingNames = {}
+    for name, _ in pairs(Config.Troll.SelectedTargets) do flingNames[#flingNames + 1] = name end
+    data.FlingTargets = flingNames
     pcall(function() writefile(SaveFile, game:GetService("HttpService"):JSONEncode(data)) end)
 end
 
@@ -136,12 +138,17 @@ Config = {
         TriggerTraps = savedData.TriggerTraps or false
     },
     Troll = {
-        Selected = nil,
-        FlingEnabled = savedData.FlingEnabled or false,
+        SelectedTargets = {},   -- name -> Player
         LoopGoToEnabled = savedData.LoopGoToEnabled or false
     }
 }
-if savedData.TrollSelected then Config.Troll.Selected = Players:FindFirstChild(savedData.TrollSelected) end
+-- Restore saved fling targets
+if savedData.FlingTargets then
+    for _, name in ipairs(savedData.FlingTargets) do
+        local p = Players:FindFirstChild(name)
+        if p and p ~= LocalPlayer then Config.Troll.SelectedTargets[name] = p end
+    end
+end
 
 -- ===================== ROLE DETECTION =====================
 local roles = {}
@@ -194,9 +201,7 @@ local function updateRoles()
 end
 local function IsAlive(player)
     local data = roles[player.Name]
-    if data and (data.Killed == true or data.Dead == true) then
-        return false
-    end
+    if data and (data.Killed == true or data.Dead == true) then return false end
     local char = player.Character
     if char then
         local hum = char:FindFirstChildOfClass("Humanoid")
@@ -319,7 +324,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.8.2"
+    title.Text = "MM2 Script  -  v4.9.0"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -684,10 +689,15 @@ local function stopTrapTrigger()
     trapProcessing = false
 end
 
--- ===================== FLING =====================
+-- ===================== FLING (KILASIK / zqyDSUWX technique — unchanged) =====================
 getgenv().OldPos = nil
 getgenv().FPDH = workspace.FallenPartsDestroyHeight
 local FlingActive = false
+local flingLoopThread = nil
+
+local function Message(Title, Text, Time)
+    Notify(Title, Text, Time or 3)
+end
 
 local function SkidFling(TargetPlayer)
     local Player = LocalPlayer
@@ -696,19 +706,45 @@ local function SkidFling(TargetPlayer)
     local RootPart = Humanoid and Humanoid.RootPart
     local TCharacter = TargetPlayer.Character
     if not TCharacter then return end
-    local THumanoid, TRootPart, THead, Accessory, Handle
-    if TCharacter:FindFirstChildOfClass("Humanoid") then THumanoid = TCharacter:FindFirstChildOfClass("Humanoid") end
-    if THumanoid and THumanoid.RootPart then TRootPart = THumanoid.RootPart end
-    if TCharacter:FindFirstChild("Head") then THead = TCharacter.Head end
-    if TCharacter:FindFirstChildOfClass("Accessory") then Accessory = TCharacter:FindFirstChildOfClass("Accessory") end
-    if Accessory and Accessory:FindFirstChild("Handle") then Handle = Accessory.Handle end
+
+    local THumanoid
+    local TRootPart
+    local THead
+    local Accessory
+    local Handle
+    if TCharacter:FindFirstChildOfClass("Humanoid") then
+        THumanoid = TCharacter:FindFirstChildOfClass("Humanoid")
+    end
+    if THumanoid and THumanoid.RootPart then
+        TRootPart = THumanoid.RootPart
+    end
+    if TCharacter:FindFirstChild("Head") then
+        THead = TCharacter.Head
+    end
+    if TCharacter:FindFirstChildOfClass("Accessory") then
+        Accessory = TCharacter:FindFirstChildOfClass("Accessory")
+    end
+    if Accessory and Accessory:FindFirstChild("Handle") then
+        Handle = Accessory.Handle
+    end
+
     if Character and Humanoid and RootPart then
-        if RootPart.Velocity.Magnitude < 50 then getgenv().OldPos = RootPart.CFrame end
-        if THumanoid and THumanoid.Sit then return Notify("Error", TargetPlayer.Name .. " is sitting", 2) end
-        if THead then workspace.CurrentCamera.CameraSubject = THead
-        elseif Handle then workspace.CurrentCamera.CameraSubject = Handle
-        elseif THumanoid and TRootPart then workspace.CurrentCamera.CameraSubject = THumanoid end
-        if not TCharacter:FindFirstChildWhichIsA("BasePart") then return end
+        if RootPart.Velocity.Magnitude < 50 then
+            getgenv().OldPos = RootPart.CFrame
+        end
+        if THumanoid and THumanoid.Sit then
+            return Message("Error", TargetPlayer.Name .. " is sitting", 2)
+        end
+        if THead then
+            workspace.CurrentCamera.CameraSubject = THead
+        elseif Handle then
+            workspace.CurrentCamera.CameraSubject = Handle
+        elseif THumanoid and TRootPart then
+            workspace.CurrentCamera.CameraSubject = THumanoid
+        end
+        if not TCharacter:FindFirstChildWhichIsA("BasePart") then
+            return
+        end
 
         local FPos = function(BasePart, Pos, Ang)
             RootPart.CFrame = CFrame.new(BasePart.Position) * Pos * Ang
@@ -758,61 +794,103 @@ local function SkidFling(TargetPlayer)
         end
 
         workspace.FallenPartsDestroyHeight = 0 / 0
+
         local BV = Instance.new("BodyVelocity")
         BV.Parent = RootPart
         BV.Velocity = Vector3.new(0, 0, 0)
         BV.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+
         Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
-        if TRootPart then SFBasePart(TRootPart)
-        elseif THead then SFBasePart(THead)
-        elseif Handle then SFBasePart(Handle)
-        else return Notify("Error", TargetPlayer.Name .. " has no valid parts", 2) end
+
+        if TRootPart then
+            SFBasePart(TRootPart)
+        elseif THead then
+            SFBasePart(THead)
+        elseif Handle then
+            SFBasePart(Handle)
+        else
+            return Message("Error", TargetPlayer.Name .. " has no valid parts", 2)
+        end
+
         BV:Destroy()
         Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
         workspace.CurrentCamera.CameraSubject = Humanoid
+
         if getgenv().OldPos then
             repeat
                 RootPart.CFrame = getgenv().OldPos * CFrame.new(0, 0.5, 0)
                 Character:SetPrimaryPartCFrame(getgenv().OldPos * CFrame.new(0, 0.5, 0))
                 Humanoid:ChangeState("GettingUp")
                 for _, part in pairs(Character:GetChildren()) do
-                    if part:IsA("BasePart") then part.Velocity, part.RotVelocity = Vector3.new(), Vector3.new() end
+                    if part:IsA("BasePart") then
+                        part.Velocity, part.RotVelocity = Vector3.new(), Vector3.new()
+                    end
                 end
                 task.wait()
             until (RootPart.Position - getgenv().OldPos.p).Magnitude < 25
             workspace.FallenPartsDestroyHeight = getgenv().FPDH
         end
     else
-        return Notify("Error", "Your character is not ready", 2)
+        return Message("Error", "Your character is not ready", 2)
     end
 end
 
-local flingLoopConnection = nil
+local function countSelectedTargets()
+    local count = 0
+    for _ in pairs(Config.Troll.SelectedTargets) do count = count + 1 end
+    return count
+end
+
 local function startFlingLoop()
-    if flingLoopConnection then return end
-    if not Config.Troll.Selected then Notify("Troll", "No target selected", 3); return end
+    if FlingActive then return end
+    if countSelectedTargets() == 0 then
+        Notify("Troll", "No targets selected", 3)
+        return
+    end
     FlingActive = true
-    flingLoopConnection = RunService.Heartbeat:Connect(function()
-        if not Config.Troll.FlingEnabled or not Config.Troll.Selected then stopFlingLoop(); return end
-        SkidFling(Config.Troll.Selected)
+    Notify("Fling", "Started - flinging " .. countSelectedTargets() .. " target(s)", 2)
+
+    flingLoopThread = task.spawn(function()
+        while FlingActive do
+            local validTargets = {}
+            for name, player in pairs(Config.Troll.SelectedTargets) do
+                if player and player.Parent then
+                    validTargets[name] = player
+                else
+                    Config.Troll.SelectedTargets[name] = nil
+                end
+            end
+            for _, player in pairs(validTargets) do
+                if not FlingActive then break end
+                SkidFling(player)
+                task.wait(0.1)
+            end
+            task.wait(0.5)
+        end
     end)
 end
+
 local function stopFlingLoop()
+    if not FlingActive then return end
     FlingActive = false
-    if flingLoopConnection then flingLoopConnection:Disconnect(); flingLoopConnection = nil end
-    Config.Troll.FlingEnabled = false
+    Notify("Fling", "Stopped", 2)
+    -- Reset FallenPartsDestroyHeight in case we stopped mid-fling
+    pcall(function() workspace.FallenPartsDestroyHeight = getgenv().FPDH end)
 end
 
 local loopGoToConnection = nil
 local function startLoopGoTo()
     if loopGoToConnection then return end
     loopGoToConnection = RunService.Heartbeat:Connect(function()
-        if not Config.Troll.LoopGoToEnabled or not Config.Troll.Selected then stopLoopGoTo(); return end
-        local target = Config.Troll.Selected
-        if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+        if not Config.Troll.LoopGoToEnabled then stopLoopGoTo(); return end
+        -- Use the first selected target as the go-to target
+        local firstTarget = nil
+        for _, p in pairs(Config.Troll.SelectedTargets) do firstTarget = p; break end
+        if not firstTarget then return end
+        if firstTarget.Character and firstTarget.Character:FindFirstChild("HumanoidRootPart") then
             local myChar = LocalPlayer.Character
             if myChar and myChar:FindFirstChild("HumanoidRootPart") then
-                myChar.HumanoidRootPart.CFrame = target.Character.HumanoidRootPart.CFrame + Vector3.new(0, 0, 3)
+                myChar.HumanoidRootPart.CFrame = firstTarget.Character.HumanoidRootPart.CFrame + Vector3.new(0, 0, 3)
             end
         end
     end)
@@ -904,23 +982,212 @@ UI:CreateToggle(helperTab, "Trigger Traps", Config.Helper.TriggerTraps, function
     if v then startTrapTrigger() else stopTrapTrigger() end
 end)
 
-UI:CreateLabel(trollTab, "Troll Features")
-local trollList = {}
-for _, p in pairs(Players:GetPlayers()) do
-    if p ~= LocalPlayer then table.insert(trollList, p.Name) end
+-- ===================== TROLL TAB (Multi-target fling list) =====================
+UI:CreateLabel(trollTab, "Troll Features — Multi-Target Fling")
+local trollStatusLabel = Instance.new("TextLabel")
+trollStatusLabel.Size = UDim2.new(1, -10, 0, 22)
+trollStatusLabel.BackgroundTransparency = 1
+trollStatusLabel.Text = "0 target(s) selected"
+trollStatusLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+trollStatusLabel.Font = Enum.Font.GothamBold
+trollStatusLabel.TextSize = 12
+trollStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+trollStatusLabel.Parent = trollTab
+
+local trollListFrame = Instance.new("ScrollingFrame")
+trollListFrame.Size = UDim2.new(1, -10, 0, 140)
+trollListFrame.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
+trollListFrame.BorderSizePixel = 0
+trollListFrame.ScrollBarThickness = 4
+trollListFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+trollListFrame.Parent = trollTab
+
+local trollListCorner = Instance.new("UICorner")
+trollListCorner.CornerRadius = UDim.new(0, 6)
+trollListCorner.Parent = trollListFrame
+
+local trollListLayout = Instance.new("UIListLayout")
+trollListLayout.Padding = UDim.new(0, 2)
+trollListLayout.Parent = trollListFrame
+
+local function refreshTrollStatus()
+    local count = countSelectedTargets()
+    if FlingActive then
+        trollStatusLabel.Text = "FLINGING " .. count .. " target(s)"
+        trollStatusLabel.TextColor3 = Color3.fromRGB(255, 80, 80)
+    else
+        trollStatusLabel.Text = count .. " target(s) selected"
+        trollStatusLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+    end
 end
-UI:CreateDropdown(trollTab, "Target Player", trollList, function(selected)
-    Config.Troll.Selected = Players:FindFirstChild(selected)
+
+local trollCheckmarks = {}
+
+local function refreshTrollList()
+    for _, child in pairs(trollListFrame:GetChildren()) do
+        if child:IsA("Frame") or child:IsA("TextButton") then child:Destroy() end
+    end
+    trollCheckmarks = {}
+    local list = Players:GetPlayers()
+    table.sort(list, function(a, b) return a.Name:lower() < b.Name:lower() end)
+    for _, p in ipairs(list) do
+        if p == LocalPlayer then continue end
+        local entry = Instance.new("Frame")
+        entry.Size = UDim2.new(1, -6, 0, 26)
+        entry.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+        entry.BorderSizePixel = 0
+        entry.Parent = trollListFrame
+
+        local cb = Instance.new("TextButton")
+        cb.Size = UDim2.new(0, 20, 0, 20)
+        cb.Position = UDim2.new(0, 4, 0.5, -10)
+        cb.BackgroundColor3 = Color3.fromRGB(70, 70, 80)
+        cb.Text = ""
+        cb.Parent = entry
+
+        local cbCorner = Instance.new("UICorner")
+        cbCorner.CornerRadius = UDim.new(0, 3)
+        cbCorner.Parent = cb
+
+        local check = Instance.new("TextLabel")
+        check.Size = UDim2.new(1, 0, 1, 0)
+        check.BackgroundTransparency = 1
+        check.Text = "✓"
+        check.TextColor3 = Color3.fromRGB(0, 255, 0)
+        check.Font = Enum.Font.GothamBold
+        check.TextSize = 14
+        check.Visible = Config.Troll.SelectedTargets[p.Name] ~= nil
+        check.Parent = cb
+
+        local nameLbl = Instance.new("TextLabel")
+        nameLbl.Size = UDim2.new(1, -30, 1, 0)
+        nameLbl.Position = UDim2.new(0, 28, 0, 0)
+        nameLbl.BackgroundTransparency = 1
+        nameLbl.Text = p.Name
+        nameLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+        nameLbl.Font = Enum.Font.Gotham
+        nameLbl.TextSize = 12
+        nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+        nameLbl.Parent = entry
+
+        local click = Instance.new("TextButton")
+        click.Size = UDim2.new(1, 0, 1, 0)
+        click.BackgroundTransparency = 1
+        click.Text = ""
+        click.ZIndex = 2
+        click.Parent = entry
+        click.MouseButton1Click:Connect(function()
+            if Config.Troll.SelectedTargets[p.Name] then
+                Config.Troll.SelectedTargets[p.Name] = nil
+                check.Visible = false
+            else
+                Config.Troll.SelectedTargets[p.Name] = p
+                check.Visible = true
+            end
+            refreshTrollStatus()
+            SaveSettings()
+        end)
+
+        trollCheckmarks[p.Name] = check
+    end
+    trollListFrame.CanvasSize = UDim2.new(0, 0, 0, #list * 28)
+end
+
+refreshTrollList()
+refreshTrollStatus()
+
+local flingBtnRow = Instance.new("Frame")
+flingBtnRow.Size = UDim2.new(1, -10, 0, 36)
+flingBtnRow.BackgroundTransparency = 1
+flingBtnRow.Parent = trollTab
+
+local startFlingBtn = Instance.new("TextButton")
+startFlingBtn.Size = UDim2.new(0.5, -4, 1, 0)
+startFlingBtn.Position = UDim2.new(0, 0, 0, 0)
+startFlingBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 0)
+startFlingBtn.Text = "START FLING"
+startFlingBtn.TextColor3 = Color3.new(1, 1, 1)
+startFlingBtn.Font = Enum.Font.GothamBold
+startFlingBtn.TextSize = 13
+startFlingBtn.Parent = flingBtnRow
+
+local stopFlingBtn = Instance.new("TextButton")
+stopFlingBtn.Size = UDim2.new(0.5, -4, 1, 0)
+stopFlingBtn.Position = UDim2.new(0.5, 4, 0, 0)
+stopFlingBtn.BackgroundColor3 = Color3.fromRGB(180, 0, 0)
+stopFlingBtn.Text = "STOP FLING"
+stopFlingBtn.TextColor3 = Color3.new(1, 1, 1)
+stopFlingBtn.Font = Enum.Font.GothamBold
+stopFlingBtn.TextSize = 13
+stopFlingBtn.Parent = flingBtnRow
+
+local selBtnRow = Instance.new("Frame")
+selBtnRow.Size = UDim2.new(1, -10, 0, 30)
+selBtnRow.BackgroundTransparency = 1
+selBtnRow.Parent = trollTab
+
+local selectAllBtn = Instance.new("TextButton")
+selectAllBtn.Size = UDim2.new(0.5, -4, 1, 0)
+selectAllBtn.Position = UDim2.new(0, 0, 0, 0)
+selectAllBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+selectAllBtn.Text = "SELECT ALL"
+selectAllBtn.TextColor3 = Color3.new(1, 1, 1)
+selectAllBtn.Font = Enum.Font.Gotham
+selectAllBtn.TextSize = 12
+selectAllBtn.Parent = selBtnRow
+
+local deselectAllBtn = Instance.new("TextButton")
+deselectAllBtn.Size = UDim2.new(0.5, -4, 1, 0)
+deselectAllBtn.Position = UDim2.new(0.5, 4, 0, 0)
+deselectAllBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+deselectAllBtn.Text = "DESELECT ALL"
+deselectAllBtn.TextColor3 = Color3.new(1, 1, 1)
+deselectAllBtn.Font = Enum.Font.Gotham
+deselectAllBtn.TextSize = 12
+deselectAllBtn.Parent = selBtnRow
+
+startFlingBtn.MouseButton1Click:Connect(function()
+    startFlingLoop()
+    refreshTrollStatus()
 end)
-UI:CreateToggle(trollTab, "Fling Selected", Config.Troll.FlingEnabled, function(v)
-    Config.Troll.FlingEnabled = v
-    if v then startFlingLoop() else stopFlingLoop() end
+stopFlingBtn.MouseButton1Click:Connect(function()
+    stopFlingLoop()
+    refreshTrollStatus()
 end)
+selectAllBtn.MouseButton1Click:Connect(function()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then Config.Troll.SelectedTargets[p.Name] = p end
+    end
+    refreshTrollList()
+    refreshTrollStatus()
+    SaveSettings()
+end)
+deselectAllBtn.MouseButton1Click:Connect(function()
+    Config.Troll.SelectedTargets = {}
+    refreshTrollList()
+    refreshTrollStatus()
+    SaveSettings()
+end)
+
+Players.PlayerAdded:Connect(function()
+    task.wait(0.5)
+    refreshTrollList()
+    refreshTrollStatus()
+end)
+Players.PlayerRemoving:Connect(function(p)
+    Config.Troll.SelectedTargets[p.Name] = nil
+    task.wait(0.3)
+    refreshTrollList()
+    refreshTrollStatus()
+end)
+
+UI:CreateLabel(trollTab, " ")
 UI:CreateToggle(trollTab, "Loop Go To Selected", Config.Troll.LoopGoToEnabled, function(v)
     Config.Troll.LoopGoToEnabled = v
     if v then startLoopGoTo() else stopLoopGoTo() end
 end)
 
+-- ===================== MISC TAB =====================
 UI:CreateLabel(miscTab, "Visuals & Misc")
 UI:CreateToggle(miscTab, "FullBright", Config.Visuals.FullBright, function(v)
     Config.Visuals.FullBright = v
@@ -1191,8 +1458,6 @@ local function shootAtVector3(targetVector3)
 end
 
 -- ===================== NAV UTILITIES =====================
--- Checks whether the straight line from `fromPos` to `toPos` is blocked by SOLID geometry.
--- Non-collidable parts (secret passages, ghost walls) are treated as passable.
 local function isDirectLineClear(fromPos, toPos, ignoreChar)
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -1201,7 +1466,6 @@ local function isDirectLineClear(fromPos, toPos, ignoreChar)
     if dir.Magnitude < 0.1 then return true, toPos end
     local result = workspace:Raycast(fromPos, dir, rayParams)
     if not result then return true, toPos end
-    -- Non-collidable part: keep going through it
     local currentStart = fromPos
     local safety = 0
     while result and result.Instance and result.Instance.CanCollide == false and safety < 10 do
@@ -1464,7 +1728,6 @@ local function startMurdererAutoPlay()
             else
                 lastPathFailed = true
                 lastFailedTargetPos = targetPos
-                -- Fallback: only walk if line is actually clear
                 local fallbackGoal
                 if usedStaging then
                     fallbackGoal = pathGoal
@@ -1510,9 +1773,7 @@ local function startMurdererAutoPlay()
         end
 
         if currentWaypointIndex > #currentWaypoints then
-            if canReachDirectly(myPos, targetPos, char) then
-                hum:MoveTo(targetPos)
-            end
+            if canReachDirectly(myPos, targetPos, char) then hum:MoveTo(targetPos) end
             return
         end
 
@@ -1574,7 +1835,7 @@ local function startMurdererAutoPlay()
     end)
 end
 
--- ===================== INNOCENT EVADE AUTO PLAY (DEAD-END + WALL-CLIP AWARE) =====================
+-- ===================== INNOCENT EVADE AUTO PLAY =====================
 local InnocentActive = false
 local innocentConnection = nil
 local innPath = nil
@@ -1725,8 +1986,6 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
     end
     table.sort(scored, function(a, b) return a.score > b.score end)
 
-    -- Validate top 5: prefer real path, allow synthetic direct path when navmesh
-    -- can't route through non-collidable "secret passage" walls.
     for i = 1, math.min(5, #scored) do
         local cand = scored[i].pos
         local straightDist = (cand - myPos).Magnitude
@@ -1734,8 +1993,6 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
 
         local testPath, testWps = computePathTo(myPos, cand)
         if not testPath then
-            -- Navmesh failed — try the "secret passage" case: walk straight through
-            -- non-collidable geometry
             if canReachDirectly(myPos, cand, myChar) then
                 testPath = makeSyntheticDirectPath(myPos, cand)
                 testWps = testPath:GetWaypoints()
@@ -1831,11 +2088,9 @@ local function startInnocentAutoPlay()
             if safePos then
                 innTargetSafePos = safePos
                 if not innPath or #innWaypoints < 2 then
-                    -- Only direct walk if the line is actually clear (not through walls)
                     if canReachDirectly(myPos, safePos, char) then
                         hum:MoveTo(safePos)
                     else
-                        -- Blocked and no path — this candidate is unreachable; blacklist
                         blacklistPos(safePos)
                         innTargetSafePos = nil
                         hum:Move(Vector3.zero)
@@ -2133,5 +2388,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.8.2 - wall-clip + secret-passage nav", 5)
-warn("[MM2] v4.8.2 ready")
+Notify("MM2 Script", "Loaded! v4.9.0 - multi-target fling + nav fixes", 5)
+warn("[MM2] v4.9.0 ready")

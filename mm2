@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.9.3  (obstacle jump detection for small walls/steps/ledges)
+    Version: 4.9.4  (idle watchdog + conditional idle behavior)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -315,7 +315,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.9.3"
+    title.Text = "MM2 Script  -  v4.9.4"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -632,7 +632,6 @@ function Library:CreateButton(parent, text, callback)
     return btn
 end
 
--- ===================== TRAP TRIGGER =====================
 local trapQueue = {}
 local trapProcessing = false
 local trapCooldown = 4.5
@@ -680,7 +679,6 @@ local function stopTrapTrigger()
     trapProcessing = false
 end
 
--- ===================== FLING =====================
 getgenv().OldPos = nil
 getgenv().FPDH = workspace.FallenPartsDestroyHeight
 local FlingActive = false
@@ -840,7 +838,6 @@ local function stopLoopGoTo()
     Config.Troll.LoopGoToEnabled = false
 end
 
--- ===================== CREATE UI =====================
 warn("[MM2] building UI")
 local UI = Library.new()
 local combatTab = UI:CreateTab("Combat")
@@ -922,7 +919,6 @@ UI:CreateToggle(helperTab, "Trigger Traps", Config.Helper.TriggerTraps, function
     if v then startTrapTrigger() else stopTrapTrigger() end
 end)
 
--- ===================== TROLL TAB =====================
 UI:CreateLabel(trollTab, "Troll Features — Multi-Target Fling")
 local trollStatusLabel = Instance.new("TextLabel")
 trollStatusLabel.Size = UDim2.new(1, -10, 0, 22)
@@ -1103,7 +1099,6 @@ UI:CreateToggle(trollTab, "Loop Go To Selected", Config.Troll.LoopGoToEnabled, f
     if v then startLoopGoTo() else stopLoopGoTo() end
 end)
 
--- ===================== MISC TAB =====================
 UI:CreateLabel(miscTab, "Visuals & Misc")
 UI:CreateToggle(miscTab, "FullBright", Config.Visuals.FullBright, function(v)
     Config.Visuals.FullBright = v
@@ -1145,7 +1140,6 @@ end
 if Config.Movement.TeleportSpawn then createSpawnBarrier() end
 if Config.Helper.TriggerTraps then startTrapTrigger() end
 
--- ===================== ESP =====================
 local espFolder = Instance.new("Folder")
 espFolder.Name = "ESPData"
 espFolder.Parent = UI.ScreenGui
@@ -1224,7 +1218,6 @@ local function updateESP()
     end
 end
 
--- ===================== SPECTATE =====================
 local spectateConnection = nil
 local function startSpectating(targetPlayer)
     if spectateConnection then spectateConnection:Disconnect() end
@@ -1241,7 +1234,6 @@ local function startSpectating(targetPlayer)
     end
 end
 
--- ===================== AUTO GRAB GUN =====================
 local function autoGrabGun()
     if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return end
     if LocalPlayer.Backpack:FindFirstChild("Gun") or LocalPlayer.Character:FindFirstChild("Gun") then return end
@@ -1262,7 +1254,6 @@ local function autoGrabGun()
     end
 end
 
--- ===================== AUTO SHOOT =====================
 local lastShotTime = 0
 local SHOOT_COOLDOWN = 0.3
 local autoEquippedGun = false
@@ -1359,7 +1350,6 @@ local function shootAtVector3(targetVector3)
     end
 end
 
--- ===================== NAV UTILITIES =====================
 local function isDirectLineClear(fromPos, toPos, ignoreChar)
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -1443,7 +1433,6 @@ local function findClimbableNear(char, centerPos, radius, minY, maxY)
     return best
 end
 
--- ===================== UNIFIED PATH EXECUTION =====================
 local pathState = {
     currentPath = nil,
     currentWaypoints = {},
@@ -1459,7 +1448,6 @@ local function resetPathState()
     pathState.lastHorizVel = 0
 end
 
--- Returns true if there's a jumpable obstacle directly ahead of the humanoid.
 local function shouldJumpOverObstacle(char, hum, myRoot, moveTarget)
     if not moveTarget then return false end
     local myPos = myRoot.Position
@@ -1467,29 +1455,21 @@ local function shouldJumpOverObstacle(char, hum, myRoot, moveTarget)
     toTarget = Vector3.new(toTarget.X, 0, toTarget.Z)
     if toTarget.Magnitude < 0.5 then return false end
     local dir = toTarget.Unit
-
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
     rayParams.FilterDescendantsInstances = {char, Camera}
-
-    -- Probe at chest height forward 2.5 studs
     local chestStart = myPos + Vector3.new(0, 2.5, 0)
     local hit = workspace:Raycast(chestStart, dir * 2.5, rayParams)
     if not hit or not hit.Instance then return false end
     if hit.Instance.CanCollide == false then return false end
-
-    -- How tall is the obstacle?
     local topProbeStart = hit.Position + Vector3.new(0, 8, 0)
     local topHit = workspace:Raycast(topProbeStart, Vector3.new(0, -12, 0), rayParams)
     if not topHit then return false end
     local obstacleHeight = topHit.Position.Y - myPos.Y
     if obstacleHeight > 5 then return false end
-
-    -- Is there a floor on the other side to land on?
     local beyondStart = hit.Position + dir * 2 + Vector3.new(0, 3, 0)
     local floorBeyond = workspace:Raycast(beyondStart, Vector3.new(0, -8, 0), rayParams)
     if not floorBeyond then return false end
-
     return true
 end
 
@@ -1521,9 +1501,7 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
         end
     end
 
-    if waypointIndex > #waypoints then
-        return "arrived", waypointIndex
-    end
+    if waypointIndex > #waypoints then return "arrived", waypointIndex end
 
     for i = waypointIndex, math.min(waypointIndex + 1, #waypoints) do
         local wp = waypoints[i]
@@ -1575,19 +1553,15 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
         end
     end
 
-    -- NEW: obstacle jump detection
     local toTarget = nextWp.Position - myPos
     toTarget = Vector3.new(toTarget.X, 0, toTarget.Z)
     if toTarget.Magnitude > 0.5 then
-        -- Check 1: direct obstacle ahead
         if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
             if (now - pathState.lastJumpTime) > 0.5 then
                 hum.Jump = true
                 pathState.lastJumpTime = now
             end
         end
-
-        -- Check 2: stalled horizontally (pressed into something)
         local horizVel = Vector3.new(
             myRoot.AssemblyLinearVelocity.X, 0, myRoot.AssemblyLinearVelocity.Z
         ).Magnitude
@@ -1775,21 +1749,14 @@ local function startMurdererAutoPlay()
                 lastPathFailed = true
                 lastFailedTargetPos = targetPos
                 local fallbackGoal
-                if usedStaging then
-                    fallbackGoal = pathGoal
+                if usedStaging then fallbackGoal = pathGoal
                 else
                     local horizDelta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
-                    if horizDelta.Magnitude < 8 then
-                        hum:Move(Vector3.zero)
-                        return
-                    end
+                    if horizDelta.Magnitude < 8 then hum:Move(Vector3.zero); return end
                     fallbackGoal = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
                 end
-                if canReachDirectly(myPos, fallbackGoal, char) then
-                    hum:MoveTo(fallbackGoal)
-                else
-                    hum:Move(Vector3.zero)
-                end
+                if canReachDirectly(myPos, fallbackGoal, char) then hum:MoveTo(fallbackGoal)
+                else hum:Move(Vector3.zero) end
                 lastPathTargetPos = pathGoal
                 return
             end
@@ -1834,6 +1801,21 @@ local INN_FAILED_RETRY_COOLDOWN = 2.0
 local innLastPathAttempt = 0
 local innPathFailed = false
 
+-- Idle watchdog state
+local innLastMoveTime = 0
+local innLastMovePos = nil
+local innIdleTier = 0
+local INN_IDLE_SOFT = 1.5
+local INN_IDLE_HARD = 3.0
+local INN_IDLE_PANIC = 5.0
+local INN_IDLE_MIN_DIST = 1.5
+
+local function resetIdleWatchdog()
+    innLastMoveTime = tick()
+    innLastMovePos = nil
+    innIdleTier = 0
+end
+
 local function stopInnocentAutoPlay()
     InnocentActive = false
     if innocentConnection then innocentConnection:Disconnect(); innocentConnection = nil end
@@ -1844,6 +1826,7 @@ local function stopInnocentAutoPlay()
     innBlacklist = {}
     innLastPathAttempt = 0
     innPathFailed = false
+    resetIdleWatchdog()
 end
 
 local function hasLineOfSight(fromPos, toPos, ignoreChar)
@@ -1895,11 +1878,8 @@ local function isBlacklisted(pos)
     local now = tick()
     for i = #innBlacklist, 1, -1 do
         local entry = innBlacklist[i]
-        if now > entry.expires then
-            table.remove(innBlacklist, i)
-        elseif (entry.pos - pos).Magnitude < 10 then
-            return true
-        end
+        if now > entry.expires then table.remove(innBlacklist, i)
+        elseif (entry.pos - pos).Magnitude < 10 then return true end
     end
     return false
 end
@@ -1920,7 +1900,6 @@ local function scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
     score = score - distFromMe * 0.3
     if distFromMe < 25 then score = score + 15 end
     if math.abs(cand.Y - myPos.Y) > 10 then score = score - 20 end
-
     local esc = analyzeEscapes(cand, myChar, murdererChar)
     if esc.longest < 25 then return -math.huge end
     if esc.long <= 1 then score = score - 50
@@ -1929,7 +1908,6 @@ local function scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
     if esc.mid >= 3 then score = score + 10 end
     if esc.short >= 5 then score = score + 5 end
     if esc.longest < 40 then score = score - 10 end
-
     return score
 end
 
@@ -2014,7 +1992,8 @@ end
 local function startInnocentAutoPlay()
     if innocentConnection then return end
     InnocentActive = true
-    Notify("Innocent Auto", "Evading (multi-distance dead-end detection)", 3)
+    resetIdleWatchdog()
+    Notify("Innocent Auto", "Evading (idle watchdog + dead-end detection)", 3)
 
     innocentConnection = RunService.Heartbeat:Connect(function()
         if not InnocentActive then return end
@@ -2032,6 +2011,41 @@ local function startInnocentAutoPlay()
         hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
 
         local myPos = myRoot.Position
+        local now = tick()
+
+        -- ============ IDLE WATCHDOG ============
+        if not innLastMovePos then
+            innLastMovePos = myPos
+            innLastMoveTime = now
+        elseif (myPos - innLastMovePos).Magnitude >= INN_IDLE_MIN_DIST then
+            innLastMovePos = myPos
+            innLastMoveTime = now
+            innIdleTier = 0
+        else
+            local idleTime = now - innLastMoveTime
+            if idleTime >= INN_IDLE_PANIC and innIdleTier < 3 then
+                innIdleTier = 3
+                innBlacklist = {}
+                innTargetSafePos = nil
+                resetPathState()
+                innLastRepath = 0
+                innLastPathAttempt = 0
+                innPathFailed = false
+                Notify("Innocent Auto", "Idle panic — full re-search", 2)
+            elseif idleTime >= INN_IDLE_HARD and innIdleTier < 2 then
+                innIdleTier = 2
+                innTargetSafePos = nil
+                resetPathState()
+                innLastRepath = 0
+                innLastPathAttempt = 0
+                innPathFailed = false
+            elseif idleTime >= INN_IDLE_SOFT and innIdleTier < 1 then
+                innIdleTier = 1
+                resetPathState()
+                innLastRepath = 0
+            end
+        end
+
         local murdererPlayer = Murder and Players:FindFirstChild(Murder)
         if not murdererPlayer or not murdererPlayer.Character then return end
         local murdererChar = murdererPlayer.Character
@@ -2043,13 +2057,16 @@ local function startInnocentAutoPlay()
         local myEye = myPos + Vector3.new(0, 2.5, 0)
         local murdererCanSeeMe = hasLineOfSight(murdererEye, myEye, murdererChar)
 
+        -- Idle only if murderer is far, can't see us, AND current spot is a good hiding spot
         if distToMurderer > INN_IDLE_RADIUS and not murdererCanSeeMe then
-            hum:Move(Vector3.zero)
-            resetPathState()
-            return
+            local esc = analyzeEscapes(myPos, char, murdererChar)
+            if esc.longest >= 25 and esc.long >= 2 then
+                hum:Move(Vector3.zero)
+                resetPathState()
+                return
+            end
+            -- Otherwise fall through to keep moving — we're in a bad spot
         end
-
-        local now = tick()
 
         if innLastPos and innTargetSafePos then
             if (now - innLastProgressCheck) >= INN_PROGRESS_CHECK_INTERVAL then
@@ -2091,8 +2108,7 @@ local function startInnocentAutoPlay()
                     innPathFailed = false
                 else
                     innPathFailed = true
-                    if canReachDirectly(myPos, safePos, char) then
-                        hum:MoveTo(safePos)
+                    if canReachDirectly(myPos, safePos, char) then hum:MoveTo(safePos)
                     else
                         blacklistPos(safePos)
                         innTargetSafePos = nil
@@ -2101,6 +2117,11 @@ local function startInnocentAutoPlay()
                     return
                 end
             else
+                -- No path. On panic tier, jog to open direction to break free.
+                if innIdleTier >= 3 then
+                    local fallback = findOpenEscape(myPos, murdererPos, char, murdererChar)
+                    if fallback then hum:MoveTo(fallback); return end
+                end
                 hum:Move(Vector3.zero)
                 resetPathState()
                 return
@@ -2110,6 +2131,10 @@ local function startInnocentAutoPlay()
         if not pathState.currentPath or #pathState.currentWaypoints < 2 then
             if innTargetSafePos and canReachDirectly(myPos, innTargetSafePos, char) then
                 hum:MoveTo(innTargetSafePos)
+            elseif innIdleTier >= 2 then
+                -- Fallback: try open escape
+                local fallback = findOpenEscape(myPos, murdererPos, char, murdererChar)
+                if fallback then hum:MoveTo(fallback) end
             end
             return
         end
@@ -2128,7 +2153,6 @@ local function startInnocentAutoPlay()
     end)
 end
 
--- ===================== HELPER SYSTEM =====================
 local lastSpectateState = { sheriff = false, murderer = false }
 local lastNotifiedPerk = nil
 local lastMurderer = nil
@@ -2229,7 +2253,6 @@ local function updateHelper()
     end
 end
 
--- ===================== AUTO SHOOT LOOP =====================
 RunService.RenderStepped:Connect(function()
     if not Config.Combat.AutoShootMurderer then return end
     local myChar = LocalPlayer.Character
@@ -2237,31 +2260,19 @@ RunService.RenderStepped:Connect(function()
     local hasGun = hasTool(LocalPlayer, "Gun")
     local hasKnife = hasTool(LocalPlayer, "Knife")
     if not hasGun or hasKnife then return end
-
     local murderer = nil
     for _, player in pairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and hasTool(player, "Knife") then
-            murderer = player
-            break
-        end
+        if player ~= LocalPlayer and hasTool(player, "Knife") then murderer = player; break end
     end
     if not murderer or not murderer.Character or not hasTool(murderer, "Knife") then return end
-
     if not isEquipped(LocalPlayer, "Gun") and not autoEquippedGun then
         local gun = LocalPlayer.Backpack:FindFirstChild("Gun")
         if gun then
             local hum = myChar:FindFirstChildOfClass("Humanoid")
-            if hum then
-                hum:EquipTool(gun)
-                autoEquippedGun = true
-                currentGunObject = gun
-            end
-        else
-            autoGrabGun()
-        end
+            if hum then hum:EquipTool(gun); autoEquippedGun = true; currentGunObject = gun end
+        else autoGrabGun() end
         return
     end
-
     if isEquipped(LocalPlayer, "Gun") then
         local predictedPos = getPredictedMurdererTargetPos(murderer.Character)
         if predictedPos and tick() - lastShotTime >= SHOOT_COOLDOWN then
@@ -2282,7 +2293,6 @@ LocalPlayer.CharacterAdded:Connect(function()
     currentGunObject = nil
 end)
 
--- ===================== SPAWN TELEPORT =====================
 RunService.Stepped:Connect(function()
     if not Config.Movement.TeleportSpawn then return end
     local char = LocalPlayer.Character
@@ -2291,7 +2301,6 @@ RunService.Stepped:Connect(function()
     char.HumanoidRootPart.CFrame = CFrame.new(70, 84, 46)
 end)
 
--- ===================== KILL SCRIPT =====================
 killScript = function()
     scriptKilled = true
     stopAutoPlay()
@@ -2301,40 +2310,24 @@ killScript = function()
     stopTrapTrigger()
     destroySpawnBarrier()
     stopSpectating()
-    for _, conn in ipairs(connections) do
-        pcall(function() conn:Disconnect() end)
-    end
-    for _, t in ipairs(threads) do
-        pcall(function() task.cancel(t) end)
-    end
+    for _, conn in ipairs(connections) do pcall(function() conn:Disconnect() end) end
+    for _, t in ipairs(threads) do pcall(function() task.cancel(t) end) end
     pcall(function() UI.ScreenGui:Destroy() end)
     if Config.Visuals.FullBright then
-        Lighting.Brightness = 1
-        Lighting.ClockTime = 14
-        Lighting.FogEnd = 1000
+        Lighting.Brightness = 1; Lighting.ClockTime = 14; Lighting.FogEnd = 1000
         Lighting.GlobalShadows = true
     end
     Notify("Script Killed", "MM2 Script has been unloaded.")
 end
 
--- ===================== UPDATE LOOPS =====================
 addThread(task.spawn(function()
-    while not scriptKilled do
-        task.wait(1)
-        pcall(updateRoles)
-    end
+    while not scriptKilled do task.wait(1); pcall(updateRoles) end
 end))
 addThread(task.spawn(function()
-    while not scriptKilled do
-        task.wait(0.3)
-        pcall(updateESP)
-    end
+    while not scriptKilled do task.wait(0.3); pcall(updateESP) end
 end))
 addThread(task.spawn(function()
-    while not scriptKilled do
-        task.wait(0.5)
-        pcall(updateHelper)
-    end
+    while not scriptKilled do task.wait(0.5); pcall(updateHelper) end
 end))
 addThread(task.spawn(function()
     while not scriptKilled do
@@ -2356,12 +2349,9 @@ addConnection(Players.PlayerAdded:Connect(function(player)
     end
 end))
 addThread(task.spawn(function()
-    while not scriptKilled do
-        task.wait(5)
-        pcall(SaveSettings)
-    end
+    while not scriptKilled do task.wait(5); pcall(SaveSettings) end
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.9.3 - obstacle jump detection", 5)
-warn("[MM2] v4.9.3 ready")
+Notify("MM2 Script", "Loaded! v4.9.4 - idle watchdog", 5)
+warn("[MM2] v4.9.4 ready")

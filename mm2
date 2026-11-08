@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.9.2  (multi-distance dead-end detection + open-space fallback)
+    Version: 4.9.3  (obstacle jump detection for small walls/steps/ledges)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -315,7 +315,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.9.2"
+    title.Text = "MM2 Script  -  v4.9.3"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -1449,12 +1449,48 @@ local pathState = {
     currentWaypoints = {},
     currentWaypointIndex = 1,
     lastJumpTime = 0,
+    lastHorizVel = 0,
 }
 
 local function resetPathState()
     pathState.currentPath = nil
     pathState.currentWaypoints = {}
     pathState.currentWaypointIndex = 1
+    pathState.lastHorizVel = 0
+end
+
+-- Returns true if there's a jumpable obstacle directly ahead of the humanoid.
+local function shouldJumpOverObstacle(char, hum, myRoot, moveTarget)
+    if not moveTarget then return false end
+    local myPos = myRoot.Position
+    local toTarget = moveTarget - myPos
+    toTarget = Vector3.new(toTarget.X, 0, toTarget.Z)
+    if toTarget.Magnitude < 0.5 then return false end
+    local dir = toTarget.Unit
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = {char, Camera}
+
+    -- Probe at chest height forward 2.5 studs
+    local chestStart = myPos + Vector3.new(0, 2.5, 0)
+    local hit = workspace:Raycast(chestStart, dir * 2.5, rayParams)
+    if not hit or not hit.Instance then return false end
+    if hit.Instance.CanCollide == false then return false end
+
+    -- How tall is the obstacle?
+    local topProbeStart = hit.Position + Vector3.new(0, 8, 0)
+    local topHit = workspace:Raycast(topProbeStart, Vector3.new(0, -12, 0), rayParams)
+    if not topHit then return false end
+    local obstacleHeight = topHit.Position.Y - myPos.Y
+    if obstacleHeight > 5 then return false end
+
+    -- Is there a floor on the other side to land on?
+    local beyondStart = hit.Position + dir * 2 + Vector3.new(0, 3, 0)
+    local floorBeyond = workspace:Raycast(beyondStart, Vector3.new(0, -8, 0), rayParams)
+    if not floorBeyond then return false end
+
+    return true
 end
 
 local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, now)
@@ -1537,6 +1573,31 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
             hum:ChangeState(Enum.HumanoidStateType.Climbing)
             return "walking", waypointIndex
         end
+    end
+
+    -- NEW: obstacle jump detection
+    local toTarget = nextWp.Position - myPos
+    toTarget = Vector3.new(toTarget.X, 0, toTarget.Z)
+    if toTarget.Magnitude > 0.5 then
+        -- Check 1: direct obstacle ahead
+        if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
+            if (now - pathState.lastJumpTime) > 0.5 then
+                hum.Jump = true
+                pathState.lastJumpTime = now
+            end
+        end
+
+        -- Check 2: stalled horizontally (pressed into something)
+        local horizVel = Vector3.new(
+            myRoot.AssemblyLinearVelocity.X, 0, myRoot.AssemblyLinearVelocity.Z
+        ).Magnitude
+        if pathState.lastHorizVel > 4 and horizVel < 1 then
+            if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
+                hum.Jump = true
+                pathState.lastJumpTime = now
+            end
+        end
+        pathState.lastHorizVel = horizVel
     end
 
     hum:MoveTo(waypoints[steerIdx].Position)
@@ -1793,8 +1854,6 @@ local function hasLineOfSight(fromPos, toPos, ignoreChar)
     return result == nil
 end
 
--- Analyze escape distance in 8 directions at 3 radii (8, 16, 30)
--- Returns table {short=N, mid=N, long=N, longest=N}
 local function analyzeEscapes(pos, ignoreChar, murdererChar)
     local dirs = {
         Vector3.new(1,0,0), Vector3.new(-1,0,0),
@@ -1862,19 +1921,11 @@ local function scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
     if distFromMe < 25 then score = score + 15 end
     if math.abs(cand.Y - myPos.Y) > 10 then score = score - 20 end
 
-    -- NEW: multi-distance escape analysis with hard dead-end rejection
     local esc = analyzeEscapes(cand, myChar, murdererChar)
-    if esc.longest < 25 then
-        -- closet/dead-end with no real escape. hard reject.
-        return -math.huge
-    end
-    if esc.long <= 1 then
-        score = score - 50
-    elseif esc.long == 2 then
-        score = score - 15
-    elseif esc.long >= 4 then
-        score = score + 20
-    end
+    if esc.longest < 25 then return -math.huge end
+    if esc.long <= 1 then score = score - 50
+    elseif esc.long == 2 then score = score - 15
+    elseif esc.long >= 4 then score = score + 20 end
     if esc.mid >= 3 then score = score + 10 end
     if esc.short >= 5 then score = score + 5 end
     if esc.longest < 40 then score = score - 10 end
@@ -1882,7 +1933,6 @@ local function scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
     return score
 end
 
--- Fallback: run toward the most open direction (avoid murderer)
 local function findOpenEscape(myPos, murdererPos, myChar, murdererChar)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
@@ -1892,11 +1942,9 @@ local function findOpenEscape(myPos, murdererPos, myChar, murdererChar)
     for angle = 0, 315, 45 do
         local rad = math.rad(angle)
         local dir = Vector3.new(math.cos(rad), 0, math.sin(rad))
-        -- Skip directions pointing toward murderer
         local toMurderer = murdererPos - myPos
         if toMurderer.Magnitude > 0.1 then
-            local dot = toMurderer.Unit:Dot(dir)
-            if dot > 0.5 then continue end
+            if toMurderer.Unit:Dot(dir) > 0.5 then continue end
         end
         local hit = workspace:Raycast(eyePos, dir * 60, params)
         local distance = 60
@@ -1904,14 +1952,9 @@ local function findOpenEscape(myPos, murdererPos, myChar, murdererChar)
         local endPos = eyePos + dir * math.min(distance, 50)
         local floorHit = workspace:Raycast(endPos, Vector3.new(0, -20, 0), params)
         if not floorHit then continue end
-        if distance > bestDist then
-            bestDist = distance
-            bestDir = dir
-        end
+        if distance > bestDist then bestDist = distance; bestDir = dir end
     end
-    if bestDir then
-        return myPos + bestDir * math.min(bestDist, 30)
-    end
+    if bestDir then return myPos + bestDir * math.min(bestDist, 30) end
     return nil
 end
 
@@ -1934,17 +1977,13 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
             end
         end
     end
-    if #candidates == 0 then
-        return findOpenEscape(myPos, murdererPos, myChar, murdererChar), nil, nil
-    end
+    if #candidates == 0 then return findOpenEscape(myPos, murdererPos, myChar, murdererChar), nil, nil end
     local scored = {}
     for _, cand in ipairs(candidates) do
         local s = scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
         if s > -math.huge then table.insert(scored, {pos = cand, score = s}) end
     end
-    if #scored == 0 then
-        return findOpenEscape(myPos, murdererPos, myChar, murdererChar), nil, nil
-    end
+    if #scored == 0 then return findOpenEscape(myPos, murdererPos, myChar, murdererChar), nil, nil end
     table.sort(scored, function(a, b) return a.score > b.score end)
     for i = 1, math.min(5, #scored) do
         local cand = scored[i].pos
@@ -1969,7 +2008,6 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
             end
         end
     end
-    -- All top candidates failed. Fall back to open-space escape.
     return findOpenEscape(myPos, murdererPos, myChar, murdererChar), nil, nil
 end
 
@@ -2063,7 +2101,6 @@ local function startInnocentAutoPlay()
                     return
                 end
             else
-                -- Fully cornered. Stop moving rather than run into a wall.
                 hum:Move(Vector3.zero)
                 resetPathState()
                 return
@@ -2326,5 +2363,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.9.2 - multi-distance dead-end detection", 5)
-warn("[MM2] v4.9.2 ready")
+Notify("MM2 Script", "Loaded! v4.9.3 - obstacle jump detection", 5)
+warn("[MM2] v4.9.3 ready")

@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.8.1  (innocent evade with dead-end avoidance)
+    Version: 4.8.2  (wall-clip detection + secret-passage nav)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -319,7 +319,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.8.1"
+    title.Text = "MM2 Script  -  v4.8.2"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -1190,6 +1190,51 @@ local function shootAtVector3(targetVector3)
     end
 end
 
+-- ===================== NAV UTILITIES =====================
+-- Checks whether the straight line from `fromPos` to `toPos` is blocked by SOLID geometry.
+-- Non-collidable parts (secret passages, ghost walls) are treated as passable.
+local function isDirectLineClear(fromPos, toPos, ignoreChar)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = {ignoreChar, Camera}
+    local dir = toPos - fromPos
+    if dir.Magnitude < 0.1 then return true, toPos end
+    local result = workspace:Raycast(fromPos, dir, rayParams)
+    if not result then return true, toPos end
+    -- Non-collidable part: keep going through it
+    local currentStart = fromPos
+    local safety = 0
+    while result and result.Instance and result.Instance.CanCollide == false and safety < 10 do
+        safety = safety + 1
+        table.insert(rayParams.FilterDescendantsInstances, result.Instance)
+        currentStart = result.Position + dir.Unit * 0.1
+        result = workspace:Raycast(currentStart, toPos - currentStart, rayParams)
+    end
+    if not result then return true, toPos end
+    return false, result.Position
+end
+
+local function canReachDirectly(fromPos, toPos, ignoreChar)
+    local isClear, _ = isDirectLineClear(
+        fromPos + Vector3.new(0, 2.5, 0),
+        toPos + Vector3.new(0, 2.5, 0),
+        ignoreChar
+    )
+    return isClear
+end
+
+local function makeSyntheticDirectPath(fromPos, toPos)
+    return {
+        Status = Enum.PathStatus.Success,
+        GetWaypoints = function()
+            return {
+                { Position = fromPos, Action = Enum.PathWaypointAction.Walk },
+                { Position = toPos,   Action = Enum.PathWaypointAction.Walk },
+            }
+        end
+    }
+end
+
 -- ===================== AUTO PLAY (MURDERER CHASE) =====================
 local AutoPlayActive = false
 local autoPlayConnection = nil
@@ -1312,9 +1357,7 @@ local function startMurdererAutoPlay()
             if dist < nearest then nearest = dist; target = player end
         end
 
-        if not target then
-            return
-        end
+        if not target then return end
 
         local targetPos = target.Character.HumanoidRootPart.Position
         local distanceToTarget = (myPos - targetPos).Magnitude
@@ -1404,6 +1447,12 @@ local function startMurdererAutoPlay()
         if shouldRecomputePath(pathGoal) and canAttemptPath then
             lastPathAttempt = now
             local newPath, wpsOrNil = computePathTo(myPos, pathGoal)
+            if not newPath then
+                if canReachDirectly(myPos, pathGoal, char) then
+                    newPath = makeSyntheticDirectPath(myPos, pathGoal)
+                    wpsOrNil = newPath:GetWaypoints()
+                end
+            end
             if newPath then
                 currentPath = newPath
                 currentWaypoints = wpsOrNil
@@ -1415,31 +1464,35 @@ local function startMurdererAutoPlay()
             else
                 lastPathFailed = true
                 lastFailedTargetPos = targetPos
+                -- Fallback: only walk if line is actually clear
+                local fallbackGoal
                 if usedStaging then
-                    hum:MoveTo(pathGoal)
+                    fallbackGoal = pathGoal
                 else
                     local horizDelta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
                     if horizDelta.Magnitude < 8 then
                         hum:Move(Vector3.zero)
-                    else
-                        hum:MoveTo(Vector3.new(targetPos.X, myPos.Y, targetPos.Z))
+                        return
                     end
+                    fallbackGoal = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
+                end
+                if canReachDirectly(myPos, fallbackGoal, char) then
+                    hum:MoveTo(fallbackGoal)
+                else
+                    hum:Move(Vector3.zero)
                 end
                 lastPathTargetPos = pathGoal
                 return
             end
         end
 
-        if not currentPath or #currentWaypoints < 2 then
-            return
-        end
+        if not currentPath or #currentWaypoints < 2 then return end
 
         while currentWaypointIndex <= #currentWaypoints do
             local wp = currentWaypoints[currentWaypointIndex]
             local diff = myPos - wp.Position
             local horiz = Vector3.new(diff.X, 0, diff.Z).Magnitude
             local vert = math.abs(diff.Y)
-
             if wp.Action == Enum.PathWaypointAction.Jump then
                 local alreadyJumped = (now - lastJumpTime) < 0.6
                 if alreadyJumped and (myPos.Y >= wp.Position.Y - 2 or horiz <= 2) then
@@ -1448,9 +1501,7 @@ local function startMurdererAutoPlay()
                     break
                 end
             else
-                local tol = 3
-                local vertTol = 5
-                if horiz <= tol and vert <= vertTol then
+                if horiz <= 3 and vert <= 5 then
                     currentWaypointIndex = currentWaypointIndex + 1
                 else
                     break
@@ -1459,7 +1510,9 @@ local function startMurdererAutoPlay()
         end
 
         if currentWaypointIndex > #currentWaypoints then
-            hum:MoveTo(targetPos)
+            if canReachDirectly(myPos, targetPos, char) then
+                hum:MoveTo(targetPos)
+            end
             return
         end
 
@@ -1470,9 +1523,7 @@ local function startMurdererAutoPlay()
                 local horizDist = Vector3.new(
                     wp.Position.X - myPos.X, 0, wp.Position.Z - myPos.Z
                 ).Magnitude
-                if horizDist <= JUMP_PROXIMITY then
-                    shouldJumpNow = true
-                end
+                if horizDist <= JUMP_PROXIMITY then shouldJumpNow = true end
                 break
             end
         end
@@ -1523,7 +1574,7 @@ local function startMurdererAutoPlay()
     end)
 end
 
--- ===================== INNOCENT EVADE AUTO PLAY (DEAD-END AWARE) =====================
+-- ===================== INNOCENT EVADE AUTO PLAY (DEAD-END + WALL-CLIP AWARE) =====================
 local InnocentActive = false
 local innocentConnection = nil
 local innPath = nil
@@ -1531,10 +1582,9 @@ local innWaypoints = {}
 local innWaypointIndex = 1
 local innLastRepath = 0
 local innTargetSafePos = nil
-local innCurrentPathLen = 0
 local innLastPos = nil
 local innLastProgressCheck = 0
-local innBlacklist = {}   -- {pos = Vector3, expires = tick()}
+local innBlacklist = {}
 local INN_REPATH_INTERVAL = 0.8
 local INN_FLEE_RADIUS = 15
 local INN_DANGER_RADIUS = 60
@@ -1567,8 +1617,6 @@ local function hasLineOfSight(fromPos, toPos, ignoreChar)
     return result == nil
 end
 
--- Count how many of 8 compass directions are open from a position.
--- Dead ends have 1, corridors have 2, open rooms have 3+.
 local function countEscapeRoutes(pos, radius, ignoreChar, murdererChar)
     local dirs = {
         Vector3.new(1,0,0), Vector3.new(-1,0,0),
@@ -1606,7 +1654,6 @@ local function blacklistPos(pos)
     if #innBlacklist > 8 then table.remove(innBlacklist, 1) end
 end
 
--- Score a candidate position: higher = safer. Now includes escape-route count.
 local function scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
     if isBlacklisted(cand) then return -math.huge end
 
@@ -1617,28 +1664,19 @@ local function scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
     local murdererEye = murdererPos + Vector3.new(0, 2.5, 0)
     local candEye = cand + Vector3.new(0, 2.5, 0)
     local visibleToMurderer = hasLineOfSight(murdererEye, candEye, murdererChar)
-    if visibleToMurderer then
-        score = score - 30
-    end
+    if visibleToMurderer then score = score - 30 end
 
     score = score - distFromMe * 0.3
+    if distFromMe < 25 then score = score + 15 end
+    if math.abs(cand.Y - myPos.Y) > 10 then score = score - 20 end
 
-    if distFromMe < 25 then
-        score = score + 15
-    end
-
-    if math.abs(cand.Y - myPos.Y) > 10 then
-        score = score - 20
-    end
-
-    -- Escape route analysis — the big fix
     local escapeRoutes = countEscapeRoutes(cand, 10, myChar, murdererChar)
     if escapeRoutes <= 1 then
-        score = score - 60   -- dead end! strongly avoid
+        score = score - 60
     elseif escapeRoutes == 2 then
-        score = score - 10   -- corridor, okay but not great
+        score = score - 10
     elseif escapeRoutes >= 4 then
-        score = score + 15   -- open area, good escape potential
+        score = score + 15
     end
 
     return score
@@ -1672,7 +1710,6 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
         return myPos + awayDir.Unit * 30
     end
 
-    -- Score all candidates and sort descending
     local scored = {}
     for _, cand in ipairs(candidates) do
         local s = scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
@@ -1688,34 +1725,37 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
     end
     table.sort(scored, function(a, b) return a.score > b.score end)
 
-    -- Try top candidates in order; validate path length vs straight-line.
-    -- If path is >3x straight-line, it's a maze/dead-end trap — reject and try next.
+    -- Validate top 5: prefer real path, allow synthetic direct path when navmesh
+    -- can't route through non-collidable "secret passage" walls.
     for i = 1, math.min(5, #scored) do
         local cand = scored[i].pos
         local straightDist = (cand - myPos).Magnitude
-        if straightDist < 5 then
-            return cand   -- basically already there
-        end
+        if straightDist < 5 then return cand end
+
         local testPath, testWps = computePathTo(myPos, cand)
+        if not testPath then
+            -- Navmesh failed — try the "secret passage" case: walk straight through
+            -- non-collidable geometry
+            if canReachDirectly(myPos, cand, myChar) then
+                testPath = makeSyntheticDirectPath(myPos, cand)
+                testWps = testPath:GetWaypoints()
+            end
+        end
         if testPath and testWps then
             local pathLen = 0
             for j = 2, #testWps do
                 pathLen = pathLen + (testWps[j].Position - testWps[j-1].Position).Magnitude
             end
             if pathLen <= straightDist * INN_MAX_PATH_DETOUR_RATIO then
-                -- This candidate has an efficient path AND decent score. Use it.
                 innPath = testPath
                 innWaypoints = testWps
-                innCurrentPathLen = pathLen
                 return cand
             else
-                -- Detour too long — likely dead-end routing. Blacklist briefly.
                 blacklistPos(cand)
             end
         end
     end
 
-    -- Nothing validated — fall back to top score, walk directly
     innPath = nil
     innWaypoints = {}
     return scored[1].pos
@@ -1724,7 +1764,7 @@ end
 local function startInnocentAutoPlay()
     if innocentConnection then return end
     InnocentActive = true
-    Notify("Innocent Auto", "Evading murderer (dead-end aware)", 3)
+    Notify("Innocent Auto", "Evading (dead-end + secret-passage aware)", 3)
 
     innocentConnection = RunService.Heartbeat:Connect(function()
         if not InnocentActive then return end
@@ -1743,9 +1783,7 @@ local function startInnocentAutoPlay()
 
         local myPos = myRoot.Position
         local murdererPlayer = Murder and Players:FindFirstChild(Murder)
-        if not murdererPlayer or not murdererPlayer.Character then
-            return
-        end
+        if not murdererPlayer or not murdererPlayer.Character then return end
         local murdererChar = murdererPlayer.Character
         local murdererRoot = murdererChar:FindFirstChild("HumanoidRootPart")
         if not murdererRoot then return end
@@ -1756,7 +1794,6 @@ local function startInnocentAutoPlay()
         local myEye = myPos + Vector3.new(0, 2.5, 0)
         local murdererCanSeeMe = hasLineOfSight(murdererEye, myEye, murdererChar)
 
-        -- Idle when safe
         if distToMurderer > INN_IDLE_RADIUS and not murdererCanSeeMe then
             hum:Move(Vector3.zero)
             innPath = nil
@@ -1767,17 +1804,15 @@ local function startInnocentAutoPlay()
 
         local now = tick()
 
-        -- Progress check: if we've been trying to move but haven't, blacklist current target
         if innLastPos and innTargetSafePos then
             if (now - innLastProgressCheck) >= INN_PROGRESS_CHECK_INTERVAL then
                 if (myPos - innLastPos).Magnitude < INN_PROGRESS_MIN_DIST then
-                    -- Stuck! Blacklist the current safe pos and force a repath
                     blacklistPos(innTargetSafePos)
                     innTargetSafePos = nil
                     innPath = nil
                     innWaypoints = {}
                     innWaypointIndex = 1
-                    innLastRepath = 0   -- force immediate repath
+                    innLastRepath = 0
                 end
                 innLastPos = myPos
                 innLastProgressCheck = now
@@ -1796,7 +1831,15 @@ local function startInnocentAutoPlay()
             if safePos then
                 innTargetSafePos = safePos
                 if not innPath or #innWaypoints < 2 then
-                    hum:MoveTo(safePos)
+                    -- Only direct walk if the line is actually clear (not through walls)
+                    if canReachDirectly(myPos, safePos, char) then
+                        hum:MoveTo(safePos)
+                    else
+                        -- Blocked and no path — this candidate is unreachable; blacklist
+                        blacklistPos(safePos)
+                        innTargetSafePos = nil
+                        hum:Move(Vector3.zero)
+                    end
                     return
                 end
                 innWaypointIndex = 2
@@ -1804,11 +1847,12 @@ local function startInnocentAutoPlay()
         end
 
         if not innPath or #innWaypoints < 2 then
-            if innTargetSafePos then hum:MoveTo(innTargetSafePos) end
+            if innTargetSafePos and canReachDirectly(myPos, innTargetSafePos, char) then
+                hum:MoveTo(innTargetSafePos)
+            end
             return
         end
 
-        -- Advance waypoints (jump-aware)
         while innWaypointIndex <= #innWaypoints do
             local wp = innWaypoints[innWaypointIndex]
             local diff = myPos - wp.Position
@@ -1831,7 +1875,6 @@ local function startInnocentAutoPlay()
         end
 
         if innWaypointIndex > #innWaypoints then
-            -- Reached the target — clear it so we pick a new one
             innTargetSafePos = nil
             innPath = nil
             innWaypoints = {}
@@ -1839,7 +1882,6 @@ local function startInnocentAutoPlay()
             return
         end
 
-        -- Proactive jump
         for i = innWaypointIndex, math.min(innWaypointIndex + 1, #innWaypoints) do
             local wp = innWaypoints[i]
             if wp.Action == Enum.PathWaypointAction.Jump then
@@ -1885,21 +1927,13 @@ local function updateHelper()
     local localIsInnocent = not localIsMurderer and not localIsSheriff
 
     if Config.Helper.AutoPlayer then
-        if localIsMurderer then
-            startMurdererAutoPlay()
-        else
-            stopAutoPlay()
-        end
+        if localIsMurderer then startMurdererAutoPlay() else stopAutoPlay() end
     else
         stopAutoPlay()
     end
 
     if Config.Helper.InnocentAutoPlayer then
-        if localIsInnocent then
-            startInnocentAutoPlay()
-        else
-            stopInnocentAutoPlay()
-        end
+        if localIsInnocent then startInnocentAutoPlay() else stopInnocentAutoPlay() end
     else
         stopInnocentAutoPlay()
     end
@@ -2099,5 +2133,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.8.1 - dead-end aware innocent evade", 5)
-warn("[MM2] v4.8.1 ready")
+Notify("MM2 Script", "Loaded! v4.8.2 - wall-clip + secret-passage nav", 5)
+warn("[MM2] v4.8.2 ready")

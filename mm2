@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.7.1  (vertical nav + freeze fix + path retry cooldown)
+    Version: 4.8.0  (innocent evade autoplayer + all v4.7.2 nav fixes)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -87,6 +87,7 @@ local function SaveSettings()
     data.LoopGoToEnabled = Config.Troll.LoopGoToEnabled
     data.TriggerTraps = Config.Helper.TriggerTraps
     data.GunESP = Config.ESP.GunESP
+    data.InnocentAutoPlayer = Config.Helper.InnocentAutoPlayer
     pcall(function() writefile(SaveFile, game:GetService("HttpService"):JSONEncode(data)) end)
 end
 
@@ -127,6 +128,7 @@ Config = {
     Helper = {
         SelectedPlayer = nil,
         AutoPlayer = savedData.AutoPlayer or false,
+        InnocentAutoPlayer = savedData.InnocentAutoPlayer or false,
         DirectChase = savedData.DirectChase or false,
         AutoGrabGunNearPlayer = savedData.AutoGrabGunNearPlayer or false,
         SpectateSheriff = savedData.SpectateSheriff or false,
@@ -191,7 +193,6 @@ local function updateRoles()
     if not Murder or not Sheriff then updateRolesByItems() end
 end
 local function IsAlive(player)
-    -- FIX: only treat as dead with positive confirmation, else trust live health
     local data = roles[player.Name]
     if data and (data.Killed == true or data.Dead == true) then
         return false
@@ -318,7 +319,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.7.1"
+    title.Text = "MM2 Script  -  v4.8.0"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -893,6 +894,7 @@ if savedData.SelectedPlayer then
     if savedPlayer then Config.Helper.SelectedPlayer = savedPlayer end
 end
 UI:CreateToggle(helperTab, "Auto Player (Murderer)", Config.Helper.AutoPlayer, function(v) Config.Helper.AutoPlayer = v end)
+UI:CreateToggle(helperTab, "Innocent Evade Auto Player", Config.Helper.InnocentAutoPlayer, function(v) Config.Helper.InnocentAutoPlayer = v end)
 UI:CreateToggle(helperTab, "Direct Chase (skip pathfinding)", Config.Helper.DirectChase, function(v) Config.Helper.DirectChase = v end)
 UI:CreateToggle(helperTab, "Auto Grab Gun When Player Near", Config.Helper.AutoGrabGunNearPlayer, function(v) Config.Helper.AutoGrabGunNearPlayer = v end)
 UI:CreateToggle(helperTab, "Spectate Sheriff", Config.Helper.SpectateSheriff, function(v) Config.Helper.SpectateSheriff = v end)
@@ -1188,7 +1190,7 @@ local function shootAtVector3(targetVector3)
     end
 end
 
--- ===================== AUTO PLAY (PATHFINDING - VERTICAL NAV + JUMP FIX) =====================
+-- ===================== AUTO PLAY (MURDERER CHASE) =====================
 local AutoPlayActive = false
 local autoPlayConnection = nil
 local currentPath = nil
@@ -1205,7 +1207,7 @@ local PATH_RECOMPUTE_TARGET_DELTA = 10
 local MIN_DIRECT_CHASE_DIST = 6
 local MAX_LOOKAHEAD_DIST = 40
 local LOOKAHEAD_STEPS = 5
-local JUMP_PROXIMITY = 6          -- horizontal distance at which we trigger a jump waypoint
+local JUMP_PROXIMITY = 6
 local stuckCheckPos = nil
 local stuckCheckTime = 0
 local stuckCounter = 0
@@ -1246,7 +1248,6 @@ local function computePathTo(fromPos, toPos)
     return path, wps
 end
 
--- Scan for a ladder/truss/stair near a given position between two Y levels
 local function findClimbableNear(char, centerPos, radius, minY, maxY)
     local overlapParams = OverlapParams.new()
     overlapParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -1296,7 +1297,6 @@ local function startMurdererAutoPlay()
 
         if hum.WalkSpeed < 14 then hum.WalkSpeed = 16 end
         if hum.JumpPower < 50 then hum.JumpPower = 50 end
-        -- CRITICAL for jump waypoints to work: allow auto-jump
         hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
 
         local myPos = myRoot.Position
@@ -1320,7 +1320,6 @@ local function startMurdererAutoPlay()
         local distanceToTarget = (myPos - targetPos).Magnitude
         local verticalGap = math.abs(myPos.Y - targetPos.Y)
 
-        -- Attack if in range (3D)
         if distanceToTarget <= ATTACK_DISTANCE then
             local knife = LocalPlayer.Backpack:FindFirstChild("Knife") or char:FindFirstChild("Knife")
             if knife then
@@ -1374,11 +1373,9 @@ local function startMurdererAutoPlay()
             return
         end
 
-        -- Decide path goal: target itself, or a staging point if target is overhead
         local pathGoal = targetPos
         local usedStaging = false
         if verticalGap > 8 then
-            -- First, look for a climbable part between us and target
             local midY = (myPos.Y + targetPos.Y) * 0.5
             local center = Vector3.new(
                 (myPos.X + targetPos.X) * 0.5,
@@ -1387,12 +1384,9 @@ local function startMurdererAutoPlay()
             )
             local climbPart = findClimbableNear(char, center, 40, myPos.Y - 5, targetPos.Y + 5)
             if climbPart then
-                -- Path to the base of the ladder/stairs
                 pathGoal = Vector3.new(climbPart.Position.X, myPos.Y, climbPart.Position.Z)
                 usedStaging = true
             else
-                -- No ladder found. Project target onto our floor so we at least
-                -- walk under the target's tile (often gets us near a stairwell).
                 pathGoal = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
                 usedStaging = true
             end
@@ -1401,7 +1395,6 @@ local function startMurdererAutoPlay()
         local now = tick()
         local canAttemptPath
         if lastPathFailed and lastFailedTargetPos then
-            -- Back off when target hasn't moved much
             local moved = (targetPos - lastFailedTargetPos).Magnitude
             canAttemptPath = (now - lastPathAttempt) >= FAILED_RETRY_COOLDOWN or moved > 15
         else
@@ -1422,14 +1415,12 @@ local function startMurdererAutoPlay()
             else
                 lastPathFailed = true
                 lastFailedTargetPos = targetPos
-                -- Fallback movement (does NOT freeze control)
                 if usedStaging then
-                    -- Walk toward the staging point directly
                     hum:MoveTo(pathGoal)
                 else
                     local horizDelta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
                     if horizDelta.Magnitude < 8 then
-                        hum:Move(Vector3.zero)  -- straight up/down, no ladder found, release control
+                        hum:Move(Vector3.zero)
                     else
                         hum:MoveTo(Vector3.new(targetPos.X, myPos.Y, targetPos.Z))
                     end
@@ -1443,16 +1434,12 @@ local function startMurdererAutoPlay()
             return
         end
 
-        -- ============ WAYPOINT ADVANCE (jump-aware) ============
         while currentWaypointIndex <= #currentWaypoints do
             local wp = currentWaypoints[currentWaypointIndex]
             local diff = myPos - wp.Position
             local horiz = Vector3.new(diff.X, 0, diff.Z).Magnitude
             local vert = math.abs(diff.Y)
 
-            -- A jump waypoint is considered "reached" only once we've jumped past
-            -- its Y level (i.e., we're above it) OR we're very close horizontally
-            -- AND we've already executed the jump.
             if wp.Action == Enum.PathWaypointAction.Jump then
                 local alreadyJumped = (now - lastJumpTime) < 0.6
                 if alreadyJumped and (myPos.Y >= wp.Position.Y - 2 or horiz <= 2) then
@@ -1476,8 +1463,6 @@ local function startMurdererAutoPlay()
             return
         end
 
-        -- ============ PROACTIVE JUMP EXECUTION ============
-        -- Look at current and next waypoint. If either is a Jump, jump NOW.
         local shouldJumpNow = false
         for i = currentWaypointIndex, math.min(currentWaypointIndex + 1, #currentWaypoints) do
             local wp = currentWaypoints[i]
@@ -1496,7 +1481,6 @@ local function startMurdererAutoPlay()
             lastJumpTime = now
         end
 
-        -- ============ LOOK-AHEAD (jump-aware) ============
         local steerIdx = currentWaypointIndex
         for i = currentWaypointIndex + 1, math.min(currentWaypointIndex + LOOKAHEAD_STEPS, #currentWaypoints) do
             local prevWp = currentWaypoints[i - 1]
@@ -1510,7 +1494,6 @@ local function startMurdererAutoPlay()
             steerIdx = i
         end
 
-        -- ============ LADDER / CLIMB HANDLING ============
         local nextWp = currentWaypoints[steerIdx]
         local climbGap = nextWp.Position.Y - myPos.Y
         if climbGap > 5 then
@@ -1539,6 +1522,231 @@ local function startMurdererAutoPlay()
         hum:MoveTo(currentWaypoints[steerIdx].Position)
     end)
 end
+
+-- ===================== INNOCENT EVADE AUTO PLAY =====================
+local InnocentActive = false
+local innocentConnection = nil
+local innPath = nil
+local innWaypoints = {}
+local innWaypointIndex = 1
+local innLastRepath = 0
+local innTargetSafePos = nil
+local INN_REPATH_INTERVAL = 0.8
+local INN_FLEE_RADIUS = 15
+local INN_DANGER_RADIUS = 60
+local INN_IDLE_RADIUS = 100
+local INN_CANDIDATE_GRID = 20
+local INN_MAX_CANDIDATES = 120
+local innLastJumpTime = 0
+local innLastSafeMove = 0
+
+local function stopInnocentAutoPlay()
+    InnocentActive = false
+    if innocentConnection then innocentConnection:Disconnect(); innocentConnection = nil end
+    innPath = nil
+    innWaypoints = {}
+    innWaypointIndex = 1
+    innTargetSafePos = nil
+    innLastRepath = 0
+end
+
+local function hasLineOfSight(fromPos, toPos, ignoreChar)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = {ignoreChar, Camera}
+    local result = workspace:Raycast(fromPos, toPos - fromPos, rayParams)
+    return result == nil
+end
+
+-- Score a candidate position: higher = safer
+local function scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
+    local distFromMurderer = (cand - murdererPos).Magnitude
+    local distFromMe = (cand - myPos).Magnitude
+
+    -- Base score = distance from murderer
+    local score = distFromMurderer
+
+    -- Big penalty if murderer can see the candidate
+    local murdererEye = murdererPos + Vector3.new(0, 2.5, 0)
+    local candEye = cand + Vector3.new(0, 2.5, 0)
+    local visibleToMurderer = hasLineOfSight(murdererEye, candEye, murdererChar)
+    if visibleToMurderer then
+        score = score - 30
+    end
+
+    -- Penalty for being too far from current position (harder to reach in time)
+    score = score - distFromMe * 0.3
+
+    -- Bonus if candidate is very close to me (fast escape)
+    if distFromMe < 25 then
+        score = score + 15
+    end
+
+    -- Penalty if candidate is on a different floor (harder to reach when panicking)
+    if math.abs(cand.Y - myPos.Y) > 10 then
+        score = score - 20
+    end
+
+    return score
+end
+
+local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
+    -- When murderer is close, only consider nearby candidates (fast escape)
+    local searchRadius = (myPos - murdererPos).Magnitude < INN_DANGER_RADIUS and 40 or 100
+    local candidates = {}
+
+    for dx = -searchRadius, searchRadius, INN_CANDIDATE_GRID do
+        for dz = -searchRadius, searchRadius, INN_CANDIDATE_GRID do
+            if #candidates >= INN_MAX_CANDIDATES then break end
+            local cand = Vector3.new(myPos.X + dx, myPos.Y, myPos.Z + dz)
+            -- Reject candidates that go into empty space (no floor beneath)
+            local rayParams = RaycastParams.new()
+            rayParams.FilterType = Enum.RaycastFilterType.Exclude
+            rayParams.FilterDescendantsInstances = {myChar, murdererChar}
+            local groundHit = workspace:Raycast(cand + Vector3.new(0, 5, 0), Vector3.new(0, -50, 0), rayParams)
+            if groundHit then
+                local groundedCand = Vector3.new(cand.X, groundHit.Position.Y, cand.Z)
+                -- Skip if too close to murderer
+                if (groundedCand - murdererPos).Magnitude > INN_FLEE_RADIUS then
+                    table.insert(candidates, groundedCand)
+                end
+            end
+        end
+    end
+
+    if #candidates == 0 then
+        -- Fallback: run directly away from murderer
+        local awayDir = (myPos - murdererPos)
+        awayDir = Vector3.new(awayDir.X, 0, awayDir.Z)
+        if awayDir.Magnitude < 0.5 then awayDir = Vector3.new(1, 0, 0) end
+        return myPos + awayDir.Unit * 30
+    end
+
+    local best, bestScore = nil, -math.huge
+    for _, cand in ipairs(candidates) do
+        local s = scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
+        if s > bestScore then best, bestScore = cand, s end
+    end
+    return best
+end
+
+local function startInnocentAutoPlay()
+    if innocentConnection then return end
+    InnocentActive = true
+    Notify("Innocent Auto", "Evading murderer", 3)
+
+    innocentConnection = RunService.Heartbeat:Connect(function()
+        if not InnocentActive then return end
+        if Murder == LocalPlayer.Name then return end
+        if Sheriff == LocalPlayer.Name or Hero == LocalPlayer.Name then return end
+
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local myRoot = char:FindFirstChild("HumanoidRootPart")
+        if not hum or not myRoot or hum.Health <= 0 then return end
+
+        if hum.WalkSpeed < 16 then hum.WalkSpeed = 16 end
+        if hum.JumpPower < 50 then hum.JumpPower = 50 end
+
+        local myPos = myRoot.Position
+        local murdererPlayer = Murder and Players:FindFirstChild(Murder)
+        if not murdererPlayer or not murdererPlayer.Character then
+            return
+        end
+        local murdererChar = murdererPlayer.Character
+        local murdererRoot = murdererChar:FindFirstChild("HumanoidRootPart")
+        if not murdererRoot then return end
+        local murdererPos = murdererRoot.Position
+        local distToMurderer = (myPos - murdererPos).Magnitude
+
+        -- Idle if murderer is far and can't see us
+        local murdererEye = murdererPos + Vector3.new(0, 2.5, 0)
+        local myEye = myPos + Vector3.new(0, 2.5, 0)
+        local murdererCanSeeMe = hasLineOfSight(murdererEye, myEye, murdererChar)
+
+        if distToMurderer > INN_IDLE_RADIUS and not murdererCanSeeMe then
+            -- Murderer far and blind to us: stand still, don't draw attention
+            hum:Move(Vector3.zero)
+            innPath = nil
+            innWaypoints = {}
+            innWaypointIndex = 1
+            return
+        end
+
+        local now = tick()
+        -- Repath on interval OR when we're in danger and need to move
+        local needRepath = (now - innLastRepath) >= INN_REPATH_INTERVAL
+        local inDanger = distToMurderer < INN_DANGER_RADIUS or murdererCanSeeMe
+
+        if needRepath or (inDanger and (not innTargetSafePos or (innTargetSafePos - myPos).Magnitude < 8)) then
+            innLastRepath = now
+            local safePos = findSafestCandidate(myPos, murdererPos, char, murdererChar)
+            if safePos then
+                innTargetSafePos = safePos
+                -- Path to it
+                local newPath, wpsOrNil = computePathTo(myPos, safePos)
+                if newPath then
+                    innPath = newPath
+                    innWaypoints = wpsOrNil
+                    innWaypointIndex = 2
+                else
+                    -- Pathfind failed; walk directly toward safe spot
+                    hum:MoveTo(safePos)
+                    return
+                end
+            end
+        end
+
+        if not innPath or #innWaypoints < 2 then
+            return
+        end
+
+        -- Advance waypoints (jump-aware, same logic as murderer autoplay)
+        while innWaypointIndex <= #innWaypoints do
+            local wp = innWaypoints[innWaypointIndex]
+            local diff = myPos - wp.Position
+            local horiz = Vector3.new(diff.X, 0, diff.Z).Magnitude
+            local vert = math.abs(diff.Y)
+            if wp.Action == Enum.PathWaypointAction.Jump then
+                local alreadyJumped = (now - innLastJumpTime) < 0.6
+                if alreadyJumped and (myPos.Y >= wp.Position.Y - 2 or horiz <= 2) then
+                    innWaypointIndex = innWaypointIndex + 1
+                else
+                    break
+                end
+            else
+                if horiz <= 3 and vert <= 5 then
+                    innWaypointIndex = innWaypointIndex + 1
+                else
+                    break
+                end
+            end
+        end
+
+        if innWaypointIndex > #innWaypoints then
+            return
+        end
+
+        -- Proactive jump
+        for i = innWaypointIndex, math.min(innWaypointIndex + 1, #innWaypoints) do
+            local wp = innWaypoints[i]
+            if wp.Action == Enum.PathWaypointAction.Jump then
+                local horizDist = Vector3.new(wp.Position.X - myPos.X, 0, wp.Position.Z - myPos.Z).Magnitude
+                if horizDist <= 6 and (now - innLastJumpTime) > 0.4 then
+                    hum.Jump = true
+                    innLastJumpTime = now
+                end
+                break
+            end
+        end
+
+        local wp = innWaypoints[innWaypointIndex]
+        hum:MoveTo(wp.Position)
+        innLastSafeMove = now
+    end)
+end
+
 -- ===================== HELPER SYSTEM =====================
 local lastSpectateState = { sheriff = false, murderer = false }
 local lastNotifiedPerk = nil
@@ -1565,7 +1773,9 @@ local function updateHelper()
     end
     local localIsMurderer = (Murder == LocalPlayer.Name)
     local localIsSheriff = (Sheriff == LocalPlayer.Name or Hero == LocalPlayer.Name)
+    local localIsInnocent = not localIsMurderer and not localIsSheriff
 
+    -- Murderer auto-play (chase)
     if Config.Helper.AutoPlayer then
         if localIsMurderer then
             startMurdererAutoPlay()
@@ -1574,6 +1784,17 @@ local function updateHelper()
         end
     else
         stopAutoPlay()
+    end
+
+    -- Innocent auto-play (evade)
+    if Config.Helper.InnocentAutoPlayer then
+        if localIsInnocent then
+            startInnocentAutoPlay()
+        else
+            stopInnocentAutoPlay()
+        end
+    else
+        stopInnocentAutoPlay()
     end
 
     local wantSpectateSheriff = Config.Helper.SpectateSheriff and not localIsSheriff
@@ -1703,6 +1924,7 @@ end)
 killScript = function()
     scriptKilled = true
     stopAutoPlay()
+    stopInnocentAutoPlay()
     stopFlingLoop()
     stopLoopGoTo()
     stopTrapTrigger()
@@ -1770,5 +1992,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.7.1 - vertical nav + freeze fix", 5)
-warn("[MM2] v4.7.1 ready")
+Notify("MM2 Script", "Loaded! v4.8.0 - innocent evade + murderer chase", 5)
+warn("[MM2] v4.8.0 ready")

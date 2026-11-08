@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.9.1  (unified path execution — innocent & murderer share nav logic)
+    Version: 4.9.2  (multi-distance dead-end detection + open-space fallback)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -29,7 +29,6 @@ local function Notify(title, text, duration)
     warn("[MM2] [" .. tostring(title) .. "] " .. tostring(text))
 end
 
--- ===================== MAP HIDE LOCATIONS =====================
 local MapHidePositions = {
     ["biolab"] = Vector3.new(647, 297, 9864),
     ["house2"] = Vector3.new(61, 265, 9055),
@@ -60,7 +59,6 @@ local function getCurrentMap()
     return nil
 end
 
--- ===================== SAVE SYSTEM =====================
 local SaveFile = "MM2_Settings.json"
 local Config
 
@@ -100,7 +98,6 @@ local function LoadSettings()
     return {}
 end
 
--- ===================== CONFIG =====================
 local savedData = LoadSettings()
 
 Config = {
@@ -148,7 +145,6 @@ if savedData.FlingTargets then
     end
 end
 
--- ===================== ROLE DETECTION =====================
 local roles = {}
 local Murder, Sheriff, Hero
 local MurderPerk = nil
@@ -215,7 +211,6 @@ local function getRole(player)
     return "Innocent", Color3.fromRGB(0, 225, 0)
 end
 
--- ===================== ANTI FLING / VOID =====================
 local antiFlingConnection = nil
 local function toggleAntiFling(enabled)
     if antiFlingConnection then antiFlingConnection:Disconnect(); antiFlingConnection = nil end
@@ -253,7 +248,6 @@ LocalPlayer.CharacterAdded:Connect(function()
     if Config.Visuals.AntiVoid then toggleAntiVoid(true) end
 end)
 
--- ===================== SPAWN BARRIER =====================
 local spawnBarrier = nil
 local function createSpawnBarrier()
     if spawnBarrier and spawnBarrier.Parent then return end
@@ -270,7 +264,6 @@ local function destroySpawnBarrier()
     if spawnBarrier then spawnBarrier:Destroy(); spawnBarrier = nil end
 end
 
--- ===================== UI LIBRARY =====================
 local Library = {}
 Library.__index = Library
 
@@ -322,7 +315,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.9.1"
+    title.Text = "MM2 Script  -  v4.9.2"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -687,7 +680,7 @@ local function stopTrapTrigger()
     trapProcessing = false
 end
 
--- ===================== FLING (KILASIK technique) =====================
+-- ===================== FLING =====================
 getgenv().OldPos = nil
 getgenv().FPDH = workspace.FallenPartsDestroyHeight
 local FlingActive = false
@@ -929,7 +922,7 @@ UI:CreateToggle(helperTab, "Trigger Traps", Config.Helper.TriggerTraps, function
     if v then startTrapTrigger() else stopTrapTrigger() end
 end)
 
--- ===================== TROLL TAB (Multi-target fling) =====================
+-- ===================== TROLL TAB =====================
 UI:CreateLabel(trollTab, "Troll Features — Multi-Target Fling")
 local trollStatusLabel = Instance.new("TextLabel")
 trollStatusLabel.Size = UDim2.new(1, -10, 0, 22)
@@ -1366,7 +1359,7 @@ local function shootAtVector3(targetVector3)
     end
 end
 
--- ===================== NAV UTILITIES (shared by both autoplays) =====================
+-- ===================== NAV UTILITIES =====================
 local function isDirectLineClear(fromPos, toPos, ignoreChar)
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -1451,29 +1444,17 @@ local function findClimbableNear(char, centerPos, radius, minY, maxY)
 end
 
 -- ===================== UNIFIED PATH EXECUTION =====================
--- Walks a humanoid along a waypoint list with jump-aware advance, proactive
--- jumping, LOS look-ahead, and ladder/climb handling.
--- Returns:
---   "walking"     — still has waypoints to consume
---   "arrived"     — consumed all waypoints
---   "stuck"       — (out param) waypoint index unchanged for too long
 local pathState = {
     currentPath = nil,
     currentWaypoints = {},
     currentWaypointIndex = 1,
     lastJumpTime = 0,
-    lastSteerIdx = 0,
-    sameSteerCount = 0,
-    lastSteerCheck = 0,
 }
 
 local function resetPathState()
     pathState.currentPath = nil
     pathState.currentWaypoints = {}
     pathState.currentWaypointIndex = 1
-    pathState.lastSteerIdx = 0
-    pathState.sameSteerCount = 0
-    pathState.lastSteerCheck = 0
 end
 
 local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, now)
@@ -1483,7 +1464,6 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
     rayParams.FilterDescendantsInstances = {char}
     local eyePos = myPos + Vector3.new(0, 2.5, 0)
 
-    -- Advance past reached waypoints (jump-aware)
     while waypointIndex <= #waypoints do
         local wp = waypoints[waypointIndex]
         local diff = myPos - wp.Position
@@ -1497,9 +1477,7 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
                 break
             end
         else
-            local tol = 3
-            local vertTol = 5
-            if horiz <= tol and vert <= vertTol then
+            if horiz <= 3 and vert <= 5 then
                 waypointIndex = waypointIndex + 1
             else
                 break
@@ -1511,7 +1489,6 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
         return "arrived", waypointIndex
     end
 
-    -- Proactive jump
     for i = waypointIndex, math.min(waypointIndex + 1, #waypoints) do
         local wp = waypoints[i]
         if wp.Action == Enum.PathWaypointAction.Jump then
@@ -1524,7 +1501,6 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
         end
     end
 
-    -- LOS look-ahead
     local steerIdx = waypointIndex
     for i = waypointIndex + 1, math.min(waypointIndex + 5, #waypoints) do
         local prevWp = waypoints[i - 1]
@@ -1538,7 +1514,6 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
         steerIdx = i
     end
 
-    -- Ladder/climb handling
     local nextWp = waypoints[steerIdx]
     local climbGap = nextWp.Position.Y - myPos.Y
     if climbGap > 5 then
@@ -1818,7 +1793,9 @@ local function hasLineOfSight(fromPos, toPos, ignoreChar)
     return result == nil
 end
 
-local function countEscapeRoutes(pos, radius, ignoreChar, murdererChar)
+-- Analyze escape distance in 8 directions at 3 radii (8, 16, 30)
+-- Returns table {short=N, mid=N, long=N, longest=N}
+local function analyzeEscapes(pos, ignoreChar, murdererChar)
     local dirs = {
         Vector3.new(1,0,0), Vector3.new(-1,0,0),
         Vector3.new(0,0,1), Vector3.new(0,0,-1),
@@ -1828,13 +1805,31 @@ local function countEscapeRoutes(pos, radius, ignoreChar, murdererChar)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = {ignoreChar, murdererChar, Camera}
-    local count = 0
-    local startPos = pos + Vector3.new(0, 2.5, 0)
+    local eyePos = pos + Vector3.new(0, 2.5, 0)
+    local shortOpen, midOpen, longOpen = 0, 0, 0
+    local longestRun = 0
     for _, dir in ipairs(dirs) do
-        local hit = workspace:Raycast(startPos, dir * radius, params)
-        if not hit then count = count + 1 end
+        local clear8 = not workspace:Raycast(eyePos, dir * 8, params)
+        if not clear8 then continue end
+        local clear16 = not workspace:Raycast(eyePos, dir * 16, params)
+        local clear30 = not workspace:Raycast(eyePos, dir * 30, params)
+        shortOpen = shortOpen + 1
+        if clear16 then midOpen = midOpen + 1 end
+        if clear30 then longOpen = longOpen + 1 end
+        local run = 8
+        if clear16 then run = 16 end
+        if clear30 then
+            run = 30
+            for _, farDist in ipairs({45, 60}) do
+                local farClear = not workspace:Raycast(eyePos, dir * farDist, params)
+                local endPos = eyePos + dir * farDist
+                local floorHit = workspace:Raycast(endPos, Vector3.new(0, -20, 0), params)
+                if farClear and floorHit then run = farDist else break end
+            end
+        end
+        if run > longestRun then longestRun = run end
     end
-    return count
+    return { short = shortOpen, mid = midOpen, long = longOpen, longest = longestRun }
 end
 
 local function isBlacklisted(pos)
@@ -1866,11 +1861,58 @@ local function scoreCandidate(cand, myPos, murdererPos, myChar, murdererChar)
     score = score - distFromMe * 0.3
     if distFromMe < 25 then score = score + 15 end
     if math.abs(cand.Y - myPos.Y) > 10 then score = score - 20 end
-    local escapeRoutes = countEscapeRoutes(cand, 10, myChar, murdererChar)
-    if escapeRoutes <= 1 then score = score - 60
-    elseif escapeRoutes == 2 then score = score - 10
-    elseif escapeRoutes >= 4 then score = score + 15 end
+
+    -- NEW: multi-distance escape analysis with hard dead-end rejection
+    local esc = analyzeEscapes(cand, myChar, murdererChar)
+    if esc.longest < 25 then
+        -- closet/dead-end with no real escape. hard reject.
+        return -math.huge
+    end
+    if esc.long <= 1 then
+        score = score - 50
+    elseif esc.long == 2 then
+        score = score - 15
+    elseif esc.long >= 4 then
+        score = score + 20
+    end
+    if esc.mid >= 3 then score = score + 10 end
+    if esc.short >= 5 then score = score + 5 end
+    if esc.longest < 40 then score = score - 10 end
+
     return score
+end
+
+-- Fallback: run toward the most open direction (avoid murderer)
+local function findOpenEscape(myPos, murdererPos, myChar, murdererChar)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {myChar, murdererChar, Camera}
+    local eyePos = myPos + Vector3.new(0, 2.5, 0)
+    local bestDir, bestDist = nil, -math.huge
+    for angle = 0, 315, 45 do
+        local rad = math.rad(angle)
+        local dir = Vector3.new(math.cos(rad), 0, math.sin(rad))
+        -- Skip directions pointing toward murderer
+        local toMurderer = murdererPos - myPos
+        if toMurderer.Magnitude > 0.1 then
+            local dot = toMurderer.Unit:Dot(dir)
+            if dot > 0.5 then continue end
+        end
+        local hit = workspace:Raycast(eyePos, dir * 60, params)
+        local distance = 60
+        if hit then distance = (hit.Position - eyePos).Magnitude end
+        local endPos = eyePos + dir * math.min(distance, 50)
+        local floorHit = workspace:Raycast(endPos, Vector3.new(0, -20, 0), params)
+        if not floorHit then continue end
+        if distance > bestDist then
+            bestDist = distance
+            bestDir = dir
+        end
+    end
+    if bestDir then
+        return myPos + bestDir * math.min(bestDist, 30)
+    end
+    return nil
 end
 
 local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
@@ -1893,10 +1935,7 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
         end
     end
     if #candidates == 0 then
-        local awayDir = (myPos - murdererPos)
-        awayDir = Vector3.new(awayDir.X, 0, awayDir.Z)
-        if awayDir.Magnitude < 0.5 then awayDir = Vector3.new(1, 0, 0) end
-        return myPos + awayDir.Unit * 30
+        return findOpenEscape(myPos, murdererPos, myChar, murdererChar), nil, nil
     end
     local scored = {}
     for _, cand in ipairs(candidates) do
@@ -1904,10 +1943,7 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
         if s > -math.huge then table.insert(scored, {pos = cand, score = s}) end
     end
     if #scored == 0 then
-        local awayDir = (myPos - murdererPos)
-        awayDir = Vector3.new(awayDir.X, 0, awayDir.Z)
-        if awayDir.Magnitude < 0.5 then awayDir = Vector3.new(1, 0, 0) end
-        return myPos + awayDir.Unit * 30
+        return findOpenEscape(myPos, murdererPos, myChar, murdererChar), nil, nil
     end
     table.sort(scored, function(a, b) return a.score > b.score end)
     for i = 1, math.min(5, #scored) do
@@ -1933,13 +1969,14 @@ local function findSafestCandidate(myPos, murdererPos, myChar, murdererChar)
             end
         end
     end
-    return scored[1].pos, nil, nil
+    -- All top candidates failed. Fall back to open-space escape.
+    return findOpenEscape(myPos, murdererPos, myChar, murdererChar), nil, nil
 end
 
 local function startInnocentAutoPlay()
     if innocentConnection then return end
     InnocentActive = true
-    Notify("Innocent Auto", "Evading (unified nav)", 3)
+    Notify("Innocent Auto", "Evading (multi-distance dead-end detection)", 3)
 
     innocentConnection = RunService.Heartbeat:Connect(function()
         if not InnocentActive then return end
@@ -1976,7 +2013,6 @@ local function startInnocentAutoPlay()
 
         local now = tick()
 
-        -- Progress watchdog
         if innLastPos and innTargetSafePos then
             if (now - innLastProgressCheck) >= INN_PROGRESS_CHECK_INTERVAL then
                 if (myPos - innLastPos).Magnitude < INN_PROGRESS_MIN_DIST then
@@ -1996,7 +2032,6 @@ local function startInnocentAutoPlay()
         local needRepath = (now - innLastRepath) >= INN_REPATH_INTERVAL
         local inDanger = distToMurderer < INN_DANGER_RADIUS or murdererCanSeeMe
 
-        -- Retry backoff (mirrors murderer autoplay)
         local canAttemptPath
         if innPathFailed then
             canAttemptPath = (now - innLastPathAttempt) >= INN_FAILED_RETRY_COOLDOWN
@@ -2027,6 +2062,11 @@ local function startInnocentAutoPlay()
                     end
                     return
                 end
+            else
+                -- Fully cornered. Stop moving rather than run into a wall.
+                hum:Move(Vector3.zero)
+                resetPathState()
+                return
             end
         end
 
@@ -2044,7 +2084,6 @@ local function startInnocentAutoPlay()
         pathState.currentWaypointIndex = newIdx
 
         if status == "arrived" then
-            -- Reached safe spot. Clear so next repath picks a new one.
             innTargetSafePos = nil
             resetPathState()
             return
@@ -2287,5 +2326,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.9.1 - unified nav for both autoplays", 5)
-warn("[MM2] v4.9.1 ready")
+Notify("MM2 Script", "Loaded! v4.9.2 - multi-distance dead-end detection", 5)
+warn("[MM2] v4.9.2 ready")

@@ -1188,7 +1188,7 @@ local function shootAtVector3(targetVector3)
     end
 end
 
--- ===================== AUTO PLAY (PATHFINDING - VERTICAL NAV + FREEZE FIX) =====================
+-- ===================== AUTO PLAY (PATHFINDING - VERTICAL NAV + JUMP FIX) =====================
 local AutoPlayActive = false
 local autoPlayConnection = nil
 local currentPath = nil
@@ -1196,15 +1196,20 @@ local currentWaypoints = {}
 local currentWaypointIndex = 1
 local lastPathTargetPos = nil
 local lastPathAttempt = 0
+local lastPathFailed = false
+local lastFailedTargetPos = nil
 local PATH_RETRY_COOLDOWN = 0.5
+local FAILED_RETRY_COOLDOWN = 2.0
 local ATTACK_DISTANCE = 5
 local PATH_RECOMPUTE_TARGET_DELTA = 10
 local MIN_DIRECT_CHASE_DIST = 6
 local MAX_LOOKAHEAD_DIST = 40
 local LOOKAHEAD_STEPS = 5
+local JUMP_PROXIMITY = 6          -- horizontal distance at which we trigger a jump waypoint
 local stuckCheckPos = nil
 local stuckCheckTime = 0
 local stuckCounter = 0
+local lastJumpTime = 0
 
 local function stopAutoPlay()
     AutoPlayActive = false
@@ -1214,6 +1219,8 @@ local function stopAutoPlay()
     currentWaypointIndex = 1
     lastPathTargetPos = nil
     lastPathAttempt = 0
+    lastPathFailed = false
+    lastFailedTargetPos = nil
     stuckCheckPos = nil
     stuckCounter = 0
 end
@@ -1221,12 +1228,13 @@ end
 local function computePathTo(fromPos, toPos)
     local ok, path = pcall(function()
         return PathfindingService:CreatePath({
-            AgentRadius = 1.5,
+            AgentRadius = 2,
             AgentHeight = 5,
             AgentCanJump = true,
             AgentCanClimb = true,
-            AgentJumpHeight = 7,
-            AgentMaxSlope = 45
+            AgentJumpHeight = 8,
+            AgentMaxSlope = 50,
+            WaypointSpacing = 4
         })
     end)
     if not ok or not path then return nil end
@@ -1236,6 +1244,28 @@ local function computePathTo(fromPos, toPos)
     local wps = path:GetWaypoints()
     if not wps or #wps < 2 then return nil end
     return path, wps
+end
+
+-- Scan for a ladder/truss/stair near a given position between two Y levels
+local function findClimbableNear(char, centerPos, radius, minY, maxY)
+    local overlapParams = OverlapParams.new()
+    overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+    overlapParams.FilterDescendantsInstances = {char}
+    local parts = workspace:GetPartBoundsInRadius(centerPos, radius, overlapParams)
+    local best, bestDist = nil, math.huge
+    for _, part in ipairs(parts) do
+        if not part:IsA("BasePart") then continue end
+        local n = string.lower(part.Name)
+        local isClimb = n:find("ladder") or n:find("truss") or n:find("climb")
+        local isStairs = n:find("stair") or n:find("step") or n:find("ramp")
+        if isClimb or isStairs then
+            if part.Position.Y >= minY and part.Position.Y <= maxY then
+                local d = (part.Position - centerPos).Magnitude
+                if d < bestDist then best, bestDist = part, d end
+            end
+        end
+    end
+    return best
 end
 
 local function shouldRecomputePath(targetPos)
@@ -1265,6 +1295,9 @@ local function startMurdererAutoPlay()
         if not hum or not myRoot or hum.Health <= 0 then return end
 
         if hum.WalkSpeed < 14 then hum.WalkSpeed = 16 end
+        if hum.JumpPower < 50 then hum.JumpPower = 50 end
+        -- CRITICAL for jump waypoints to work: allow auto-jump
+        hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
 
         local myPos = myRoot.Position
 
@@ -1279,13 +1312,13 @@ local function startMurdererAutoPlay()
             if dist < nearest then nearest = dist; target = player end
         end
 
-        -- FIX: never call MoveTo(myPos) — that freezes the humanoid. Just return.
         if not target then
             return
         end
 
         local targetPos = target.Character.HumanoidRootPart.Position
         local distanceToTarget = (myPos - targetPos).Magnitude
+        local verticalGap = math.abs(myPos.Y - targetPos.Y)
 
         -- Attack if in range (3D)
         if distanceToTarget <= ATTACK_DISTANCE then
@@ -1314,7 +1347,6 @@ local function startMurdererAutoPlay()
         local hit = workspace:Raycast(eyePos, targetEyePos - eyePos, rayParams)
         local targetVisible = (hit == nil)
 
-        local verticalGap = math.abs(myPos.Y - targetPos.Y)
         local sameLevel = verticalGap < 8
         local canDirectChase = targetVisible and sameLevel and stuckCounter < 2
             and distanceToTarget >= MIN_DIRECT_CHASE_DIST
@@ -1342,50 +1374,67 @@ local function startMurdererAutoPlay()
             return
         end
 
-        -- Pathfinding with retry cooldown
-        if shouldRecomputePath(targetPos) and (tick() - lastPathAttempt) >= PATH_RETRY_COOLDOWN then
-            lastPathAttempt = tick()
-            local newPath, wpsOrNil = computePathTo(myPos, targetPos)
+        -- Decide path goal: target itself, or a staging point if target is overhead
+        local pathGoal = targetPos
+        local usedStaging = false
+        if verticalGap > 8 then
+            -- First, look for a climbable part between us and target
+            local midY = (myPos.Y + targetPos.Y) * 0.5
+            local center = Vector3.new(
+                (myPos.X + targetPos.X) * 0.5,
+                midY,
+                (myPos.Z + targetPos.Z) * 0.5
+            )
+            local climbPart = findClimbableNear(char, center, 40, myPos.Y - 5, targetPos.Y + 5)
+            if climbPart then
+                -- Path to the base of the ladder/stairs
+                pathGoal = Vector3.new(climbPart.Position.X, myPos.Y, climbPart.Position.Z)
+                usedStaging = true
+            else
+                -- No ladder found. Project target onto our floor so we at least
+                -- walk under the target's tile (often gets us near a stairwell).
+                pathGoal = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
+                usedStaging = true
+            end
+        end
+
+        local now = tick()
+        local canAttemptPath
+        if lastPathFailed and lastFailedTargetPos then
+            -- Back off when target hasn't moved much
+            local moved = (targetPos - lastFailedTargetPos).Magnitude
+            canAttemptPath = (now - lastPathAttempt) >= FAILED_RETRY_COOLDOWN or moved > 15
+        else
+            canAttemptPath = (now - lastPathAttempt) >= PATH_RETRY_COOLDOWN
+        end
+
+        if shouldRecomputePath(pathGoal) and canAttemptPath then
+            lastPathAttempt = now
+            local newPath, wpsOrNil = computePathTo(myPos, pathGoal)
             if newPath then
                 currentPath = newPath
                 currentWaypoints = wpsOrNil
                 currentWaypointIndex = 2
-                lastPathTargetPos = targetPos
+                lastPathTargetPos = pathGoal
                 stuckCounter = 0
+                lastPathFailed = false
+                lastFailedTargetPos = nil
             else
-                -- Pathfinding failed. Handle "target overhead" gracefully.
-                local horizDelta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
-                local horizDist = horizDelta.Magnitude
-                if horizDist < 8 then
-                    -- Target is straight up/down. Look for a ladder/truss near midpoint.
-                    local overlapParams = OverlapParams.new()
-                    overlapParams.FilterType = Enum.RaycastFilterType.Exclude
-                    overlapParams.FilterDescendantsInstances = {char}
-                    local probePos = Vector3.new(
-                        targetPos.X,
-                        myPos.Y + (targetPos.Y - myPos.Y) * 0.5,
-                        targetPos.Z
-                    )
-                    local parts = workspace:GetPartBoundsInRadius(probePos, 20, overlapParams)
-                    local searchDir = nil
-                    for _, part in ipairs(parts) do
-                        local n = string.lower(part.Name)
-                        if n:find("ladder") or n:find("truss") or n:find("climb") then
-                            searchDir = Vector3.new(part.Position.X - myPos.X, 0, part.Position.Z - myPos.Z)
-                            break
-                        end
-                    end
-                    if searchDir and searchDir.Magnitude > 0.5 then
-                        hum:MoveTo(myPos + searchDir.Unit * 5)
-                    else
-                        -- No ladder found. Release control so player can navigate.
-                        hum:Move(Vector3.zero)
-                    end
+                lastPathFailed = true
+                lastFailedTargetPos = targetPos
+                -- Fallback movement (does NOT freeze control)
+                if usedStaging then
+                    -- Walk toward the staging point directly
+                    hum:MoveTo(pathGoal)
                 else
-                    -- Horizontally offset — walk to their XZ position (below them).
-                    hum:MoveTo(Vector3.new(targetPos.X, myPos.Y, targetPos.Z))
+                    local horizDelta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
+                    if horizDelta.Magnitude < 8 then
+                        hum:Move(Vector3.zero)  -- straight up/down, no ladder found, release control
+                    else
+                        hum:MoveTo(Vector3.new(targetPos.X, myPos.Y, targetPos.Z))
+                    end
                 end
-                lastPathTargetPos = targetPos
+                lastPathTargetPos = pathGoal
                 return
             end
         end
@@ -1394,18 +1443,31 @@ local function startMurdererAutoPlay()
             return
         end
 
-        -- 3D waypoint advance check
+        -- ============ WAYPOINT ADVANCE (jump-aware) ============
         while currentWaypointIndex <= #currentWaypoints do
             local wp = currentWaypoints[currentWaypointIndex]
             local diff = myPos - wp.Position
             local horiz = Vector3.new(diff.X, 0, diff.Z).Magnitude
             local vert = math.abs(diff.Y)
-            local tol = (wp.Action == Enum.PathWaypointAction.Jump) and 4 or 2.5
-            local vertTol = (wp.Action == Enum.PathWaypointAction.Jump) and 6 or 4
-            if horiz <= tol and vert <= vertTol then
-                currentWaypointIndex = currentWaypointIndex + 1
+
+            -- A jump waypoint is considered "reached" only once we've jumped past
+            -- its Y level (i.e., we're above it) OR we're very close horizontally
+            -- AND we've already executed the jump.
+            if wp.Action == Enum.PathWaypointAction.Jump then
+                local alreadyJumped = (now - lastJumpTime) < 0.6
+                if alreadyJumped and (myPos.Y >= wp.Position.Y - 2 or horiz <= 2) then
+                    currentWaypointIndex = currentWaypointIndex + 1
+                else
+                    break
+                end
             else
-                break
+                local tol = 3
+                local vertTol = 5
+                if horiz <= tol and vert <= vertTol then
+                    currentWaypointIndex = currentWaypointIndex + 1
+                else
+                    break
+                end
             end
         end
 
@@ -1414,7 +1476,27 @@ local function startMurdererAutoPlay()
             return
         end
 
-        -- Look-ahead that respects jump/climb waypoints
+        -- ============ PROACTIVE JUMP EXECUTION ============
+        -- Look at current and next waypoint. If either is a Jump, jump NOW.
+        local shouldJumpNow = false
+        for i = currentWaypointIndex, math.min(currentWaypointIndex + 1, #currentWaypoints) do
+            local wp = currentWaypoints[i]
+            if wp.Action == Enum.PathWaypointAction.Jump then
+                local horizDist = Vector3.new(
+                    wp.Position.X - myPos.X, 0, wp.Position.Z - myPos.Z
+                ).Magnitude
+                if horizDist <= JUMP_PROXIMITY then
+                    shouldJumpNow = true
+                end
+                break
+            end
+        end
+        if shouldJumpNow and (now - lastJumpTime) > 0.4 then
+            hum.Jump = true
+            lastJumpTime = now
+        end
+
+        -- ============ LOOK-AHEAD (jump-aware) ============
         local steerIdx = currentWaypointIndex
         for i = currentWaypointIndex + 1, math.min(currentWaypointIndex + LOOKAHEAD_STEPS, #currentWaypoints) do
             local prevWp = currentWaypoints[i - 1]
@@ -1428,15 +1510,7 @@ local function startMurdererAutoPlay()
             steerIdx = i
         end
 
-        -- Execute jump if needed
-        for i = currentWaypointIndex, steerIdx do
-            if currentWaypoints[i].Action == Enum.PathWaypointAction.Jump then
-                hum.Jump = true
-                break
-            end
-        end
-
-        -- Ladder / climb handling
+        -- ============ LADDER / CLIMB HANDLING ============
         local nextWp = currentWaypoints[steerIdx]
         local climbGap = nextWp.Position.Y - myPos.Y
         if climbGap > 5 then
@@ -1465,7 +1539,6 @@ local function startMurdererAutoPlay()
         hum:MoveTo(currentWaypoints[steerIdx].Position)
     end)
 end
-
 -- ===================== HELPER SYSTEM =====================
 local lastSpectateState = { sheriff = false, murderer = false }
 local lastNotifiedPerk = nil

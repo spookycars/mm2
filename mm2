@@ -1,148 +1,153 @@
--- Spawn Point Finder — Diagnostic
--- Scans the entire workspace (including loaded map models) for anything
--- that could be a spawn point, and reports what it finds.
+-- MAP STRUCTURE DUMP
+-- Prints the tree of the currently loaded map so we can find spawns
 
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
 local gui = Instance.new("ScreenGui")
-gui.Name = "SpawnFinder"
+gui.Name = "MapDump"
 gui.ResetOnSpawn = false
 gui.Parent = game:GetService("CoreGui")
 
-local out = Instance.new("ScrollingFrame")
-out.Size = UDim2.new(0, 400, 0, 400)
-out.Position = UDim2.new(0.5, -200, 0.5, -200)
-out.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
-out.BorderSizePixel = 0
-out.ScrollBarThickness = 6
-out.CanvasSize = UDim2.new(0, 0, 0, 0)
-out.AutomaticCanvasSize = Enum.AutomaticSize.Y
-out.Parent = gui
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 420, 0, 480)
+frame.Position = UDim2.new(0.5, -210, 0.5, -240)
+frame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+frame.BorderSizePixel = 0
+frame.Parent = gui
 
 local corner = Instance.new("UICorner")
 corner.CornerRadius = UDim.new(0, 8)
-corner.Parent = out
+corner.Parent = frame
+
+local scroll = Instance.new("ScrollingFrame")
+scroll.Size = UDim2.new(1, -8, 1, -40)
+scroll.Position = UDim2.new(0, 4, 0, 4)
+scroll.BackgroundTransparency = 1
+scroll.BorderSizePixel = 0
+scroll.ScrollBarThickness = 6
+scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scroll.Parent = frame
 
 local layout = Instance.new("UIListLayout")
-layout.Padding = UDim.new(0, 2)
-layout.Parent = out
+layout.Padding = UDim.new(0, 1)
+layout.Parent = scroll
 
 local closeBtn = Instance.new("TextButton")
-closeBtn.Size = UDim2.new(0, 60, 0, 26)
-closeBtn.Position = UDim2.new(1, -70, 0, 4)
+closeBtn.Size = UDim2.new(1, -8, 0, 28)
+closeBtn.Position = UDim2.new(0, 4, 1, -34)
 closeBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
-closeBtn.Text = "Close"
+closeBtn.Text = "CLOSE + COPY ALL TO CONSOLE"
 closeBtn.TextColor3 = Color3.new(1, 1, 1)
 closeBtn.Font = Enum.Font.GothamBold
 closeBtn.TextSize = 12
-closeBtn.ZIndex = 5
-closeBtn.Parent = out
-closeBtn.MouseButton1Click:Connect(function() gui:Destroy() end)
+closeBtn.Parent = frame
 
+local allText = {}
 local function log(text, color)
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -8, 0, 0)
+    lbl.Size = UDim2.new(1, -4, 0, 0)
     lbl.AutomaticSize = Enum.AutomaticSize.Y
-    lbl.Position = UDim2.new(0, 4, 0, 0)
     lbl.BackgroundTransparency = 1
     lbl.TextWrapped = true
     lbl.TextXAlignment = Enum.TextXAlignment.Left
     lbl.Font = Enum.Font.Code
-    lbl.TextSize = 11
-    lbl.TextColor3 = color or Color3.fromRGB(220, 220, 220)
+    lbl.TextSize = 10
+    lbl.TextColor3 = color or Color3.fromRGB(200, 200, 200)
     lbl.Text = text
-    lbl.Parent = out
-    return lbl
+    lbl.Parent = scroll
+    table.insert(allText, text)
 end
 
--- ============ REPORT 1: World children ============
-log("=== WORKSPACE CHILDREN ===", Color3.fromRGB(255, 200, 80))
+-- Find the biggest model/folder in workspace (that's the loaded map)
+local biggest, biggestCount = nil, 0
 for _, child in ipairs(workspace:GetChildren()) do
-    log("  " .. child.ClassName .. "  " .. child.Name, Color3.fromRGB(180, 180, 180))
-end
-
--- ============ REPORT 2: SpawnLocation instances anywhere ============
-log("", nil)
-log("=== SpawnLocation INSTANCES ===", Color3.fromRGB(255, 200, 80))
-local spawnCount = 0
-for _, d in ipairs(workspace:GetDescendants()) do
-    if d:IsA("SpawnLocation") then
-        spawnCount = spawnCount + 1
-        log(string.format("  %s  @ (%.0f, %.0f, %.0f)",
-            d:GetFullName(), d.Position.X, d.Position.Y, d.Position.Z), Color3.fromRGB(120, 220, 120))
-    end
-end
-log("  Total: " .. spawnCount, Color3.fromRGB(120, 220, 120))
-
--- ============ REPORT 3: Parts whose name contains "spawn" ============
-log("", nil)
-log("=== PARTS NAMED *spawn* ===", Color3.fromRGB(255, 200, 80))
-local namedCount = 0
-for _, d in ipairs(workspace:GetDescendants()) do
-    if d:IsA("BasePart") and string.lower(d.Name):find("spawn") then
-        namedCount = namedCount + 1
-        log(string.format("  %s  @ (%.0f, %.0f, %.0f)",
-            d:GetFullName(), d.Position.X, d.Position.Y, d.Position.Z), Color3.fromRGB(120, 220, 120))
-    end
-end
-log("  Total: " .. namedCount, Color3.fromRGB(120, 220, 120))
-
--- ============ REPORT 4: Models/folders whose name contains "spawn" ============
-log("", nil)
-log("=== FOLDERS/MODELS NAMED *spawn* ===", Color3.fromRGB(255, 200, 80))
-for _, d in ipairs(workspace:GetDescendants()) do
-    if (d:IsA("Folder") or d:IsA("Model")) and string.lower(d.Name):find("spawn") then
-        local count = 0
-        for _, p in ipairs(d:GetDescendants()) do
-            if p:IsA("BasePart") then count = count + 1 end
-        end
-        log(string.format("  %s  (%d parts inside)", d:GetFullName(), count), Color3.fromRGB(180, 180, 255))
-    end
-end
-
--- ============ REPORT 5: Child count per top-level model ============
-log("", nil)
-log("=== MAP MODELS (top-level) ===", Color3.fromRGB(255, 200, 80))
-for _, child in ipairs(workspace:GetChildren()) do
-    if child:IsA("Model") or child:IsA("Folder") then
-        local descendantCount = #child:GetDescendants()
-        if descendantCount > 20 then
-            log("  " .. child.ClassName .. "  " .. child.Name .. "  (" .. descendantCount .. " descendants)", Color3.fromRGB(180, 180, 255))
+    if (child:IsA("Model") or child:IsA("Folder")) and child.Name ~= "Players" then
+        local c = #child:GetDescendants()
+        if c > biggestCount then
+            biggest, biggestCount = child, c
         end
     end
 end
 
--- ============ REPORT 6: Player character spawn position ============
-log("", nil)
-log("=== PLAYER SPAWN INFO ===", Color3.fromRGB(255, 200, 80))
-if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-    local pos = LocalPlayer.Character.HumanoidRootPart.Position
-    log(string.format("  My current position: (%.0f, %.0f, %.0f)", pos.X, pos.Y, pos.Z), Color3.fromRGB(120, 220, 120))
+if not biggest then
+    log("No map model found in workspace", Color3.fromRGB(255, 80, 80))
+    return
 end
 
--- ============ REPORT 7: Inside the current map model, look for anything spawn-ish ============
+log("=== LOADED MAP: " .. biggest.Name .. " ===", Color3.fromRGB(255, 200, 80))
+log("Total descendants: " .. biggestCount, Color3.fromRGB(180, 180, 180))
 log("", nil)
-log("=== POSSIBLE SPAWN MARKERS INSIDE MAP ===", Color3.fromRGB(255, 200, 80))
-for _, child in ipairs(workspace:GetChildren()) do
-    if child:IsA("Model") or child:IsA("Folder") then
-        -- Check for parts inside named spawn-related things
-        for _, d in ipairs(child:GetDescendants()) do
-            if d:IsA("BasePart") then
-                local n = string.lower(d.Name)
-                if n:find("spawn") or n:find("start") or n:find("respawn") or n:find("checkpoint") then
-                    log(string.format("  %s  @ (%.0f, %.0f, %.0f)",
-                        d:GetFullName(), d.Position.X, d.Position.Y, d.Position.Z), Color3.fromRGB(255, 150, 100))
-                end
-            elseif d:IsA("Folder") or d:IsA("Model") then
-                local n = string.lower(d.Name)
-                if n:find("spawn") or n:find("start") then
-                    log("  Container: " .. d:GetFullName(), Color3.fromRGB(255, 150, 100))
-                end
-            end
+
+-- Dump all direct children of the map
+log("--- Direct children of " .. biggest.Name .. " ---", Color3.fromRGB(255, 200, 80))
+for _, child in ipairs(biggest:GetChildren()) do
+    local count = #child:GetDescendants()
+    log(string.format("  [%s] %s  (%d descendants)",
+        child.ClassName, child.Name, count), Color3.fromRGB(180, 180, 255))
+end
+
+log("", nil)
+log("--- Anything containing 'spawn' (case-insensitive) ---", Color3.fromRGB(255, 200, 80))
+local found = false
+for _, d in ipairs(biggest:GetDescendants()) do
+    if string.lower(d.Name):find("spawn") then
+        found = true
+        local extra = ""
+        if d:IsA("BasePart") then
+            extra = string.format(" @ (%.0f, %.0f, %.0f)", d.Position.X, d.Position.Y, d.Position.Z)
         end
+        log(string.format("  [%s] %s%s", d.ClassName, d:GetFullName(), extra), Color3.fromRGB(120, 220, 120))
+    end
+end
+if not found then
+    log("  (none found)", Color3.fromRGB(180, 180, 180))
+end
+
+log("", nil)
+log("--- Anything containing 'start' or 'respawn' or 'checkpoint' ---", Color3.fromRGB(255, 200, 80))
+for _, d in ipairs(biggest:GetDescendants()) do
+    local n = string.lower(d.Name)
+    if n:find("start") or n:find("respawn") or n:find("checkpoint") or n:find("arrival") or n:find("entry") then
+        local extra = ""
+        if d:IsA("BasePart") then
+            extra = string.format(" @ (%.0f, %.0f, %.0f)", d.Position.X, d.Position.Y, d.Position.Z)
+        end
+        log(string.format("  [%s] %s%s", d.ClassName, d:GetFullName(), extra), Color3.fromRGB(255, 150, 100))
     end
 end
 
 log("", nil)
-log("=== DONE ===", Color3.fromRGB(255, 200, 80))
+log("--- Folders/Models at top level of map ---", Color3.fromRGB(255, 200, 80))
+for _, child in ipairs(biggest:GetChildren()) do
+    if child:IsA("Folder") or child:IsA("Model") then
+        log("  " .. child.ClassName .. ": " .. child.Name, Color3.fromRGB(180, 180, 255))
+    end
+end
+
+log("", nil)
+log("--- All BaseParts with unusual names (not 'Part', 'Wall', etc.) ---", Color3.fromRGB(255, 200, 80))
+local common = {
+    part=true, wall=true, floor=true, ceiling=true, brick=true, block=true,
+    wedge=true, cylinder=true, sphere=true, mesh=true, ["union"]=true,
+    ["negated"]=true, ["plate"]=true, ["platform"]=true, ["door"]=true,
+    ["window"]=true, ["glass"]=true, ["roof"]=true, ["stairs"]=true,
+    ["stair"]=true, ["step"]=true, ["railing"]=true, ["support"]=true,
+    ["beam"]=true, ["column"]=true, ["floor"]=true
+}
+for _, d in ipairs(biggest:GetDescendants()) do
+    if d:IsA("BasePart") then
+        local n = string.lower(d.Name)
+        if not common[n] and not n:find("^part") and not n:find("^wall") then
+            log(string.format("  [%s] %s @ (%.0f, %.0f, %.0f)",
+                d.ClassName, d.Name, d.Position.X, d.Position.Y, d.Position.Z), Color3.fromRGB(150, 150, 200))
+        end
+    end
+end
+
+closeBtn.MouseButton1Click:Connect(function()
+    print("=== MAP DUMP ===")
+    for _, t in ipairs(allText) do print(t) end
+    gui:Destroy()
+end)

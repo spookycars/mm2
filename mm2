@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.11.3  (jump/MoveTo conflict fix, stuck-jump cooldown)
+    Version: 4.11.5  (proper head-clearance check — jumps low obstacles even with ceiling)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -316,7 +316,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.11.3"
+    title.Text = "MM2 Script  -  v4.11.5"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -1449,6 +1449,20 @@ local function resetPathState()
     pathState.lastHorizVel = 0
 end
 
+-- ===================== OBSTACLE JUMP (correct logic) =====================
+-- The question is: "Is there a low obstacle directly in front that I can
+-- physically clear by jumping?"
+
+-- The conditions are INDEPENDENT:
+--   1. There IS an obstacle ahead at chest height (ray forward hits something)
+--   2. The TOP of that obstacle is only 1-3 studs above my feet (low enough to
+--      jump over — the humanoid jump clears ~5-6 studs so anything under 3 is
+--      safe)
+--   3. There IS floor on the other side of the obstacle (not a cliff)
+--   4. There is NO ceiling within jump height above my head (else I hit it)
+
+-- Note: an overhead ceiling above the OBSTACLE is completely fine — the
+-- obstacle's own top is what we're jumping OVER, not under.
 local function shouldJumpOverObstacle(char, hum, myRoot, moveTarget)
     if not moveTarget then return false end
     local myPos = myRoot.Position
@@ -1459,21 +1473,32 @@ local function shouldJumpOverObstacle(char, hum, myRoot, moveTarget)
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
     rayParams.FilterDescendantsInstances = {char, Camera}
+
+    -- Condition 4: is there head-clearance to jump? If a ceiling is within
+    -- ~8 studs of my head, jumping would bang into it.
+    local headStart = myPos + Vector3.new(0, 5, 0)
+    local headHit = workspace:Raycast(headStart, Vector3.new(0, 8, 0), rayParams)
+    if headHit then return false end
+
+    -- Condition 1: obstacle ahead
     local chestStart = myPos + Vector3.new(0, 2.5, 0)
     local hit = workspace:Raycast(chestStart, dir * 2.5, rayParams)
     if not hit or not hit.Instance then return false end
     if hit.Instance.CanCollide == false then return false end
+
+    -- Condition 2: how tall is the obstacle?
     local topProbeStart = hit.Position + Vector3.new(0, 8, 0)
     local topHit = workspace:Raycast(topProbeStart, Vector3.new(0, -12, 0), rayParams)
     if not topHit then return false end
     local obstacleHeight = topHit.Position.Y - myPos.Y
-    if obstacleHeight > 3.5 then return false end
-    local aboveStart = topHit.Position + Vector3.new(0, 0.5, 0)
-    local aboveHit = workspace:Raycast(aboveStart, Vector3.new(0, 5, 0), rayParams)
-    if aboveHit then return false end
+    -- Only jump over genuinely LOW obstacles (steps, small boxes, curbs)
+    if obstacleHeight > 3 then return false end
+
+    -- Condition 3: landing floor beyond the obstacle
     local beyondStart = hit.Position + dir * 2 + Vector3.new(0, 3, 0)
     local floorBeyond = workspace:Raycast(beyondStart, Vector3.new(0, -8, 0), rayParams)
     if not floorBeyond then return false end
+
     return true
 end
 
@@ -1507,7 +1532,6 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
 
     if waypointIndex > #waypoints then return "arrived", waypointIndex end
 
-    -- Proactive jump for navmesh jump waypoints (no MoveTo same frame)
     for i = waypointIndex, math.min(waypointIndex + 1, #waypoints) do
         local wp = waypoints[i]
         if wp.Action == Enum.PathWaypointAction.Jump then
@@ -1516,7 +1540,7 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
                 hum.Jump = true
                 pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                 pathState.lastJumpTime = now
-                return "walking", waypointIndex  -- RETURN, don't MoveTo
+                return "walking", waypointIndex
             end
             break
         end
@@ -1560,17 +1584,15 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
         end
     end
 
-    -- Obstacle jump: if jump, RETURN (don't MoveTo same frame)
     if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
         if (now - pathState.lastJumpTime) > 0.5 then
             hum.Jump = true
             pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
             pathState.lastJumpTime = now
-            return "walking", waypointIndex  -- RETURN, skip MoveTo
+            return "walking", waypointIndex
         end
     end
 
-    -- Stalled-velocity jump: also return if we jump
     local horizVel = Vector3.new(
         myRoot.AssemblyLinearVelocity.X, 0, myRoot.AssemblyLinearVelocity.Z
     ).Magnitude
@@ -1581,7 +1603,7 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
                 pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                 pathState.lastJumpTime = now
                 pathState.lastHorizVel = horizVel
-                return "walking", waypointIndex  -- RETURN, skip MoveTo
+                return "walking", waypointIndex
             end
         end
     end
@@ -1617,7 +1639,6 @@ local function canRunAutoplay(char, hum)
     return true
 end
 
--- ===================== AUTO PLAY (MURDERER CHASE) =====================
 local AutoPlayActive = false
 local autoPlayConnection = nil
 local PATH_RETRY_COOLDOWN = 0.5
@@ -1723,7 +1744,7 @@ local function startMurdererAutoPlay()
                         hum.Jump = true
                         pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                         pathState.lastJumpTime = now
-                        return  -- don't MoveTo this frame
+                        return
                     end
                 end
                 hum:MoveTo(targetPos)
@@ -1769,13 +1790,12 @@ local function startMurdererAutoPlay()
         end
 
         if canDirectChase then
-            -- aggressive jump for elevated target: return on jump frame
             if verticalGap > 1.5 and (now - pathState.lastJumpTime) > 0.5 then
                 if shouldJumpOverObstacle(char, hum, myRoot, targetPos) or verticalGap > 2 then
                     hum.Jump = true
                     pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                     pathState.lastJumpTime = now
-                    return  -- don't MoveTo, jump frame
+                    return
                 end
             end
             hum:MoveTo(targetPos)
@@ -2029,7 +2049,6 @@ local function startCandyFarm()
         elseif (now - candyStuckTime) >= 0.6 then
             if (myPos - candyStuckPos).Magnitude < 1.5 then
                 candyStuckCounter = candyStuckCounter + 1
-                -- Only jump if not jumped recently
                 if (now - candyLastJumpTime) > 0.6 then
                     hum.Jump = true
                     pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
@@ -2060,13 +2079,12 @@ local function startCandyFarm()
         local canDirect = visible and sameLevel and distToTarget >= CANDY_MIN_DIRECT_DIST
 
         if canDirect then
-            -- If jump needed, RETURN without MoveTo
             if shouldJumpOverObstacle(char, hum, myRoot, targetPos) then
                 if (now - candyLastJumpTime) > 0.5 then
                     hum.Jump = true
                     pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                     candyLastJumpTime = now
-                    return  -- don't MoveTo this frame
+                    return
                 end
             end
             hum:MoveTo(targetPos)
@@ -2151,7 +2169,6 @@ local function startCandyFarm()
             return
         end
 
-        -- Navmesh jump waypoint: jump + RETURN
         for i = candyWpIndex, math.min(candyWpIndex + 1, #candyWaypoints) do
             local wp = candyWaypoints[i]
             if wp.Action == Enum.PathWaypointAction.Jump then
@@ -2162,7 +2179,7 @@ local function startCandyFarm()
                     hum.Jump = true
                     pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                     candyLastJumpTime = now
-                    return  -- don't MoveTo
+                    return
                 end
                 break
             end
@@ -2206,13 +2223,12 @@ local function startCandyFarm()
             end
         end
 
-        -- Obstacle jump: jump + RETURN
         if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
             if (now - candyLastJumpTime) > 0.5 then
                 hum.Jump = true
                 pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                 candyLastJumpTime = now
-                return  -- don't MoveTo
+                return
             end
         end
 
@@ -2424,5 +2440,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.11.3 - jump/MoveTo conflict fixed", 5)
-warn("[MM2] v4.11.3 ready")
+Notify("MM2 Script", "Loaded! v4.11.5 - proper obstacle jump detection", 5)
+warn("[MM2] v4.11.5 ready")

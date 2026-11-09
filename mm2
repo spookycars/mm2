@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.11.0  (innocent autoplay chases candy/coins — same logic as murderer chase)
+    Version: 4.11.1  (no doorway jumps, no spawn-jump, no log GUI)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -20,185 +20,6 @@ local CollectionService = game:GetService("CollectionService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
--- ===================== ON-SCREEN LOG GUI =====================
-local logGui = Instance.new("ScreenGui")
-logGui.Name = "MM2_LogPanel"
-logGui.ResetOnSpawn = false
-logGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-logGui.DisplayOrder = 999
-logGui.Parent = game:GetService("CoreGui")
-
-local logToggle = Instance.new("TextButton")
-logToggle.Size = UDim2.new(0, 110, 0, 36)
-logToggle.Position = UDim2.new(1, -120, 0, 10)
-logToggle.BackgroundColor3 = Color3.fromRGB(60, 20, 20)
-logToggle.Text = "📋 Log"
-logToggle.TextColor3 = Color3.new(1, 1, 1)
-logToggle.Font = Enum.Font.GothamBold
-logToggle.TextSize = 14
-logToggle.Parent = logGui
-
-local logToggleCorner = Instance.new("UICorner")
-logToggleCorner.CornerRadius = UDim.new(0, 6)
-logToggleCorner.Parent = logToggle
-
-local logStroke = Instance.new("UIStroke")
-logStroke.Color = Color3.fromRGB(180, 40, 40)
-logStroke.Thickness = 1.5
-logStroke.Parent = logToggle
-
-local logPanel = Instance.new("Frame")
-logPanel.Size = UDim2.new(0, 320, 0, 220)
-logPanel.Position = UDim2.new(1, -330, 0, 55)
-logPanel.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
-logPanel.BackgroundTransparency = 0.1
-logPanel.BorderSizePixel = 0
-logPanel.Active = true
-logPanel.Visible = true
-logPanel.Parent = logGui
-
-local logPanelCorner = Instance.new("UICorner")
-logPanelCorner.CornerRadius = UDim.new(0, 8)
-logPanelCorner.Parent = logPanel
-
-local logPanelStroke = Instance.new("UIStroke")
-logPanelStroke.Color = Color3.fromRGB(180, 40, 40)
-logPanelStroke.Thickness = 1.5
-logPanelStroke.Parent = logPanel
-
-local logHeader = Instance.new("TextButton")
-logHeader.Size = UDim2.new(1, 0, 0, 28)
-logHeader.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
-logHeader.Text = ""
-logHeader.AutoButtonColor = false
-logHeader.Parent = logPanel
-
-local logHeaderCorner = Instance.new("UICorner")
-logHeaderCorner.CornerRadius = UDim.new(0, 8)
-logHeaderCorner.Parent = logHeader
-
-local logHeaderPad = Instance.new("Frame")
-logHeaderPad.Size = UDim2.new(1, 0, 0, 12)
-logHeaderPad.Position = UDim2.new(0, 0, 1, -12)
-logHeaderPad.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
-logHeaderPad.BorderSizePixel = 0
-logHeaderPad.Parent = logHeader
-
-local logHeaderText = Instance.new("TextLabel")
-logHeaderText.Size = UDim2.new(1, -12, 1, 0)
-logHeaderText.Position = UDim2.new(0, 8, 0, 0)
-logHeaderText.BackgroundTransparency = 1
-logHeaderText.Text = "MM2 Log  (tap to collapse)"
-logHeaderText.TextColor3 = Color3.fromRGB(255, 80, 80)
-logHeaderText.Font = Enum.Font.GothamBold
-logHeaderText.TextSize = 12
-logHeaderText.TextXAlignment = Enum.TextXAlignment.Left
-logHeaderText.Parent = logHeader
-
-local logScroll = Instance.new("ScrollingFrame")
-logScroll.Size = UDim2.new(1, -8, 1, -36)
-logScroll.Position = UDim2.new(0, 4, 0, 32)
-logScroll.BackgroundTransparency = 1
-logScroll.BorderSizePixel = 0
-logScroll.ScrollBarThickness = 4
-logScroll.ScrollBarImageColor3 = Color3.fromRGB(180, 40, 40)
-logScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-logScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-logScroll.ScrollingDirection = Enum.ScrollingDirection.Y
-logScroll.Parent = logPanel
-
-local logLayout = Instance.new("UIListLayout")
-logLayout.Padding = UDim.new(0, 3)
-logLayout.SortOrder = Enum.SortOrder.LayoutOrder
-logLayout.Parent = logScroll
-
-local logEntries = {}
-local LOG_MAX_ENTRIES = 40
-
-local function colorForTag(tag)
-    tag = string.lower(tostring(tag))
-    if tag:find("kill") or tag:find("error") or tag:find("fail") then
-        return Color3.fromRGB(255, 80, 80)
-    elseif tag:find("warn") or tag:find("panic") or tag:find("stopped") then
-        return Color3.fromRGB(255, 200, 80)
-    elseif tag:find("auto") or tag:find("loaded") or tag:find("start") or tag:find("candy") then
-        return Color3.fromRGB(120, 220, 120)
-    else
-        return Color3.fromRGB(220, 220, 220)
-    end
-end
-
-local function pushLog(tag, text)
-    local entry = Instance.new("TextLabel")
-    entry.Size = UDim2.new(1, -4, 0, 0)
-    entry.AutomaticSize = Enum.AutomaticSize.Y
-    entry.BackgroundTransparency = 1
-    entry.TextWrapped = true
-    entry.TextXAlignment = Enum.TextXAlignment.Left
-    entry.Font = Enum.Font.Gotham
-    entry.TextSize = 11
-    entry.TextColor3 = colorForTag(tag)
-    local t = os.date("%H:%M:%S")
-    entry.Text = "[" .. t .. "] " .. tag .. ": " .. text
-    entry.LayoutOrder = math.floor(tick() * 1000)
-    entry.Parent = logScroll
-
-    table.insert(logEntries, entry)
-    if #logEntries > LOG_MAX_ENTRIES then
-        local oldest = table.remove(logEntries, 1)
-        if oldest then oldest:Destroy() end
-    end
-
-    task.defer(function()
-        pcall(function()
-            logScroll.CanvasPosition = Vector2.new(0, logScroll.AbsoluteCanvasSize.Y)
-        end)
-    end)
-end
-
-local logExpanded = true
-logHeader.MouseButton1Click:Connect(function()
-    logExpanded = not logExpanded
-    logScroll.Visible = logExpanded
-    logPanel.Size = logExpanded and UDim2.new(0, 320, 0, 220) or UDim2.new(0, 320, 0, 28)
-    logHeaderText.Text = logExpanded and "MM2 Log  (tap to collapse)" or "MM2 Log  (tap to expand)"
-end)
-
-local logPanelVisible = true
-logToggle.MouseButton1Click:Connect(function()
-    logPanelVisible = not logPanelVisible
-    logPanel.Visible = logPanelVisible
-end)
-
-local logDragStart, logStartPos, logDragging = nil, nil, false
-logToggle.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.Touch
-        or input.UserInputType == Enum.UserInputType.MouseButton1 then
-        logDragging = true
-        logDragStart = input.Position
-        logStartPos = logToggle.Position
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                logDragging = false
-                logDragStart = nil
-            end
-        end)
-    end
-end)
-UserInputService.InputChanged:Connect(function(input)
-    if logDragging and logDragStart then
-        if input.UserInputType == Enum.UserInputType.Touch
-            or input.UserInputType == Enum.UserInputType.MouseMovement then
-            local delta = input.Position - logDragStart
-            logToggle.Position = UDim2.new(
-                logStartPos.X.Scale, logStartPos.X.Offset + delta.X,
-                logStartPos.Y.Scale, logStartPos.Y.Offset + delta.Y
-            )
-        end
-    end
-end)
-
--- ===================== Notify (routed through log GUI) =====================
 local function Notify(title, text, duration)
     duration = duration or 4
     pcall(function()
@@ -207,7 +28,6 @@ local function Notify(title, text, duration)
         })
     end)
     warn("[MM2] [" .. tostring(title) .. "] " .. tostring(text))
-    pcall(function() pushLog(tostring(title), tostring(text)) end)
 end
 
 -- ===================== MAP HIDE LOCATIONS =====================
@@ -503,7 +323,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.11.0"
+    title.Text = "MM2 Script  -  v4.11.1"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -1645,6 +1465,8 @@ local function resetPathState()
     pathState.lastHorizVel = 0
 end
 
+-- FIXED obstacle jump: rejects doorways/archways by checking for
+-- solid geometry ABOVE the obstacle.
 local function shouldJumpOverObstacle(char, hum, myRoot, moveTarget)
     if not moveTarget then return false end
     local myPos = myRoot.Position
@@ -1655,18 +1477,31 @@ local function shouldJumpOverObstacle(char, hum, myRoot, moveTarget)
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
     rayParams.FilterDescendantsInstances = {char, Camera}
+
+    -- Probe at chest height (2.5 studs) forward 2.5 studs
     local chestStart = myPos + Vector3.new(0, 2.5, 0)
     local hit = workspace:Raycast(chestStart, dir * 2.5, rayParams)
     if not hit or not hit.Instance then return false end
     if hit.Instance.CanCollide == false then return false end
+
+    -- How tall is the obstacle?
     local topProbeStart = hit.Position + Vector3.new(0, 8, 0)
     local topHit = workspace:Raycast(topProbeStart, Vector3.new(0, -12, 0), rayParams)
     if not topHit then return false end
     local obstacleHeight = topHit.Position.Y - myPos.Y
-    if obstacleHeight > 5 then return false end
+    if obstacleHeight > 3.5 then return false end  -- lowered: only low steps/crates
+
+    -- KEY FIX: if there's solid geometry above the obstacle, it's a doorway/arch,
+    -- NOT a jumpable obstacle. Doorways have frames above; crates don't.
+    local aboveStart = topHit.Position + Vector3.new(0, 0.5, 0)
+    local aboveHit = workspace:Raycast(aboveStart, Vector3.new(0, 5, 0), rayParams)
+    if aboveHit then return false end
+
+    -- Landing floor check
     local beyondStart = hit.Position + dir * 2 + Vector3.new(0, 3, 0)
     local floorBeyond = workspace:Raycast(beyondStart, Vector3.new(0, -8, 0), rayParams)
     if not floorBeyond then return false end
+
     return true
 end
 
@@ -1778,6 +1613,35 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
     return "walking", waypointIndex
 end
 
+-- ===================== ALIVE / RESPAWN GATE =====================
+-- Prevents jump-on-respawn by requiring the humanoid to be alive and not in
+-- the Dead/Physics/Seated state, and requiring a settle delay after respawn.
+local lastSpawnTime = 0
+local SPAWN_SETTLE = 1.0
+
+LocalPlayer.CharacterAdded:Connect(function()
+    lastSpawnTime = tick()
+    pathState.lastJumpTime = 0
+    pathState.lastHorizVel = 0
+    pathState.currentPath = nil
+    pathState.currentWaypoints = {}
+    pathState.currentWaypointIndex = 1
+end)
+
+local function canRunAutoplay(char, hum)
+    if not char or not hum then return false end
+    if hum.Health <= 0 then return false end
+    if (tick() - lastSpawnTime) < SPAWN_SETTLE then return false end
+    local state = hum:GetState()
+    if state == Enum.HumanoidStateType.Dead
+        or state == Enum.HumanoidStateType.Physics
+        or state == Enum.HumanoidStateType.FallingDown
+        or state == Enum.HumanoidStateType.Ragdoll then
+        return false
+    end
+    return true
+end
+
 -- ===================== AUTO PLAY (MURDERER CHASE) =====================
 local AutoPlayActive = false
 local autoPlayConnection = nil
@@ -1835,7 +1699,11 @@ local function startMurdererAutoPlay()
         if not char then return end
         local hum = char:FindFirstChildOfClass("Humanoid")
         local myRoot = char:FindFirstChild("HumanoidRootPart")
-        if not hum or not myRoot or hum.Health <= 0 then return end
+        if not hum or not myRoot then return end
+        if not canRunAutoplay(char, hum) then
+            pcall(function() hum:Move(Vector3.zero) end)
+            return
+        end
 
         if hum.WalkSpeed < 14 then hum.WalkSpeed = 16 end
         if hum.JumpPower < 50 then hum.JumpPower = 50 end
@@ -2012,14 +1880,9 @@ local function startMurdererAutoPlay()
 end
 
 -- ===================== INNOCENT CANDY FARM (CHASE) =====================
--- Same chase logic as murderer autoplay, but target = nearest candy/coin part
--- instead of nearest player. No attack, no escape-route scoring, no dead-end logic.
--- If a candy is in a dead end, we go get it — dead ends are fine for collection.
-
 local CandyActive = false
 local candyConnection = nil
 
--- Chase-state (separate from murderer's pathState, so both can run without collision)
 local candyPath = nil
 local candyWaypoints = {}
 local candyWpIndex = 1
@@ -2041,7 +1904,6 @@ local CANDY_FAILED_RETRY_COOLDOWN = 2.0
 local CANDY_MIN_DIRECT_DIST = 4
 local CANDY_BAD_COOLDOWN = 5.0
 local CANDY_REACH_DIST = 6
-local CANDY_RECHECK_INTERVAL = 0.4
 
 local function resetCandyState()
     candyPath = nil
@@ -2064,22 +1926,21 @@ local function stopCandyFarm()
     candyBadTargetTime = 0
 end
 
--- Find nearest candy/coin part on the map.
--- Checks: name match, CollectionService tag, and parent folder name.
 local function isCandyPart(part)
     if not part or not part:IsA("BasePart") then return false end
     local n = string.lower(part.Name)
     if n:find("candy") or n:find("coin") or n:find("collect") or n:find("money") then
         return true
     end
-    -- CollectionService tags
-    for _, tag in ipairs(CollectionService:GetTags(part)) do
-        local t = string.lower(tag)
-        if t:find("candy") or t:find("coin") or t:find("collect") then
-            return true
+    local ok, tags = pcall(function() return CollectionService:GetTags(part) end)
+    if ok and tags then
+        for _, tag in ipairs(tags) do
+            local t = string.lower(tag)
+            if t:find("candy") or t:find("coin") or t:find("collect") then
+                return true
+            end
         end
     end
-    -- Parent folder name
     local parent = part.Parent
     if parent then
         local pn = string.lower(parent.Name)
@@ -2094,7 +1955,6 @@ local function findNearestCandy(myPos, ignoreChar, now)
     local best, bestDist = nil, math.huge
     for _, d in ipairs(workspace:GetDescendants()) do
         if isCandyPart(d) then
-            -- Skip if we recently failed on this candy
             if d == candyBadTarget and (now - candyBadTargetTime) < CANDY_BAD_COOLDOWN then
                 continue
             end
@@ -2122,7 +1982,11 @@ local function startCandyFarm()
         if not char then return end
         local hum = char:FindFirstChildOfClass("Humanoid")
         local myRoot = char:FindFirstChild("HumanoidRootPart")
-        if not hum or not myRoot or hum.Health <= 0 then return end
+        if not hum or not myRoot then return end
+        if not canRunAutoplay(char, hum) then
+            pcall(function() hum:Move(Vector3.zero) end)
+            return
+        end
 
         if hum.WalkSpeed < 16 then hum.WalkSpeed = 16 end
         if hum.JumpPower < 50 then hum.JumpPower = 50 end
@@ -2131,13 +1995,10 @@ local function startCandyFarm()
         local myPos = myRoot.Position
         local now = tick()
 
-        -- Pick target
         local target = candyCurrentTargetPart
         if not target or not target.Parent then
-            -- No current target, find one
             local found, dist = findNearestCandy(myPos, char, now)
             if not found then
-                -- No candy on the map — stop, wait for next frame
                 if hum.MoveDirection.Magnitude > 0 then
                     hum:Move(Vector3.zero)
                 end
@@ -2145,21 +2006,17 @@ local function startCandyFarm()
             end
             target = found
             candyCurrentTargetPart = target
-            -- Force a fresh path since target changed
             resetCandyState()
             candyCurrentTargetPart = target
         end
 
         local targetPos = target.Position
-
-        -- Already there? Wait for it to be collected (part disappears)
         local distToTarget = (myPos - targetPos).Magnitude
         if distToTarget < CANDY_REACH_DIST then
             hum:Move(Vector3.zero)
             return
         end
 
-        -- Stuck detection
         if not candyStuckPos then
             candyStuckPos = myPos
             candyStuckTime = now
@@ -2183,7 +2040,6 @@ local function startCandyFarm()
             candyStuckTime = now
         end
 
-        -- Direct chase if LOS + same level
         local rayParams = RaycastParams.new()
         rayParams.FilterType = Enum.RaycastFilterType.Exclude
         rayParams.FilterDescendantsInstances = {char}
@@ -2210,7 +2066,6 @@ local function startCandyFarm()
             return
         end
 
-        -- Pathfinding
         local needRepath = (not candyPath)
             or (#candyWaypoints < 2)
             or (candyWpIndex > #candyWaypoints)
@@ -2245,7 +2100,6 @@ local function startCandyFarm()
             else
                 candyPathFailed = true
                 candyLastFailedTargetPos = targetPos
-                -- Fallback: walk if LOS clear
                 if canReachDirectly(myPos, targetPos, char) then
                     hum:MoveTo(targetPos)
                 else
@@ -2257,7 +2111,6 @@ local function startCandyFarm()
 
         if not candyPath or #candyWaypoints < 2 then return end
 
-        -- Execute waypoints (same jump/lookahead logic as murderer autoplay)
         while candyWpIndex <= #candyWaypoints do
             local wp = candyWaypoints[candyWpIndex]
             local diff = myPos - wp.Position
@@ -2287,7 +2140,6 @@ local function startCandyFarm()
             return
         end
 
-        -- Proactive jump
         for i = candyWpIndex, math.min(candyWpIndex + 1, #candyWaypoints) do
             local wp = candyWaypoints[i]
             if wp.Action == Enum.PathWaypointAction.Jump then
@@ -2303,7 +2155,6 @@ local function startCandyFarm()
             end
         end
 
-        -- Look-ahead
         local steerIdx = candyWpIndex
         for i = candyWpIndex + 1, math.min(candyWpIndex + 5, #candyWaypoints) do
             local prevWp = candyWaypoints[i - 1]
@@ -2317,7 +2168,6 @@ local function startCandyFarm()
             steerIdx = i
         end
 
-        -- Ladder
         local nextWp = candyWaypoints[steerIdx]
         local climbGap = nextWp.Position.Y - myPos.Y
         if climbGap > 5 then
@@ -2343,7 +2193,6 @@ local function startCandyFarm()
             end
         end
 
-        -- Obstacle jump
         local toT = nextWp.Position - myPos
         toT = Vector3.new(toT.X, 0, toT.Z)
         if toT.Magnitude > 0.5 then
@@ -2466,6 +2315,9 @@ RunService.RenderStepped:Connect(function()
     if not Config.Combat.AutoShootMurderer then return end
     local myChar = LocalPlayer.Character
     if not myChar then return end
+    local hum = myChar:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    if not canRunAutoplay(myChar, hum) then return end
     local hasGun = hasTool(LocalPlayer, "Gun")
     local hasKnife = hasTool(LocalPlayer, "Knife")
     if not hasGun or hasKnife then return end
@@ -2477,8 +2329,7 @@ RunService.RenderStepped:Connect(function()
     if not isEquipped(LocalPlayer, "Gun") and not autoEquippedGun then
         local gun = LocalPlayer.Backpack:FindFirstChild("Gun")
         if gun then
-            local hum = myChar:FindFirstChildOfClass("Humanoid")
-            if hum then hum:EquipTool(gun); autoEquippedGun = true; currentGunObject = gun end
+            hum:EquipTool(gun); autoEquippedGun = true; currentGunObject = gun
         else autoGrabGun() end
         return
     end
@@ -2507,6 +2358,8 @@ RunService.Stepped:Connect(function()
     if not Config.Movement.TeleportSpawn then return end
     local char = LocalPlayer.Character
     if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not canRunAutoplay(char, hum) then return end
     if Murder == LocalPlayer.Name or Sheriff == LocalPlayer.Name or Hero == LocalPlayer.Name then return end
     char.HumanoidRootPart.CFrame = CFrame.new(70, 84, 46)
 end)
@@ -2524,7 +2377,6 @@ killScript = function()
     for _, conn in ipairs(connections) do pcall(function() conn:Disconnect() end) end
     for _, t in ipairs(threads) do pcall(function() task.cancel(t) end) end
     pcall(function() UI.ScreenGui:Destroy() end)
-    pcall(function() logGui:Destroy() end)
     if Config.Visuals.FullBright then
         Lighting.Brightness = 1; Lighting.ClockTime = 14; Lighting.FogEnd = 1000
         Lighting.GlobalShadows = true
@@ -2566,5 +2418,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.11.0 - innocent autoplay chases candy/coins", 5)
-warn("[MM2] v4.11.0 ready")
+Notify("MM2 Script", "Loaded! v4.11.1 - no doorway jumps, no spawn-jump", 5)
+warn("[MM2] v4.11.1 ready")

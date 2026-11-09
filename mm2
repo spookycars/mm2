@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.11.2  (candy farm avoids murderer-adjacent candies)
+    Version: 4.11.3  (jump/MoveTo conflict fix, stuck-jump cooldown)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -30,7 +30,6 @@ local function Notify(title, text, duration)
     warn("[MM2] [" .. tostring(title) .. "] " .. tostring(text))
 end
 
--- ===================== MAP HIDE LOCATIONS =====================
 local MapHidePositions = {
     ["biolab"] = Vector3.new(647, 297, 9864),
     ["house2"] = Vector3.new(61, 265, 9055),
@@ -61,7 +60,6 @@ local function getCurrentMap()
     return nil
 end
 
--- ===================== SAVE SYSTEM =====================
 local SaveFile = "MM2_Settings.json"
 local Config
 
@@ -101,7 +99,6 @@ local function LoadSettings()
     return {}
 end
 
--- ===================== CONFIG =====================
 local savedData = LoadSettings()
 
 Config = {
@@ -149,7 +146,6 @@ if savedData.FlingTargets then
     end
 end
 
--- ===================== ROLE DETECTION =====================
 local roles = {}
 local Murder, Sheriff, Hero
 local MurderPerk = nil
@@ -216,7 +212,6 @@ local function getRole(player)
     return "Innocent", Color3.fromRGB(0, 225, 0)
 end
 
--- ===================== ANTI FLING / VOID =====================
 local antiFlingConnection = nil
 local function toggleAntiFling(enabled)
     if antiFlingConnection then antiFlingConnection:Disconnect(); antiFlingConnection = nil end
@@ -254,7 +249,6 @@ LocalPlayer.CharacterAdded:Connect(function()
     if Config.Visuals.AntiVoid then toggleAntiVoid(true) end
 end)
 
--- ===================== SPAWN BARRIER =====================
 local spawnBarrier = nil
 local function createSpawnBarrier()
     if spawnBarrier and spawnBarrier.Parent then return end
@@ -271,7 +265,6 @@ local function destroySpawnBarrier()
     if spawnBarrier then spawnBarrier:Destroy(); spawnBarrier = nil end
 end
 
--- ===================== UI LIBRARY =====================
 local Library = {}
 Library.__index = Library
 
@@ -323,7 +316,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.11.2"
+    title.Text = "MM2 Script  -  v4.11.3"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -640,7 +633,6 @@ function Library:CreateButton(parent, text, callback)
     return btn
 end
 
--- ===================== TRAP TRIGGER =====================
 local trapQueue = {}
 local trapProcessing = false
 local trapCooldown = 4.5
@@ -688,7 +680,6 @@ local function stopTrapTrigger()
     trapProcessing = false
 end
 
--- ===================== FLING (KILASIK technique) =====================
 getgenv().OldPos = nil
 getgenv().FPDH = workspace.FallenPartsDestroyHeight
 local FlingActive = false
@@ -848,7 +839,6 @@ local function stopLoopGoTo()
     Config.Troll.LoopGoToEnabled = false
 end
 
--- ===================== CREATE UI =====================
 warn("[MM2] building UI")
 local UI = Library.new()
 local combatTab = UI:CreateTab("Combat")
@@ -1151,7 +1141,6 @@ end
 if Config.Movement.TeleportSpawn then createSpawnBarrier() end
 if Config.Helper.TriggerTraps then startTrapTrigger() end
 
--- ===================== ESP =====================
 local espFolder = Instance.new("Folder")
 espFolder.Name = "ESPData"
 espFolder.Parent = UI.ScreenGui
@@ -1230,7 +1219,6 @@ local function updateESP()
     end
 end
 
--- ===================== SPECTATE =====================
 local spectateConnection = nil
 local function startSpectating(targetPlayer)
     if spectateConnection then spectateConnection:Disconnect() end
@@ -1247,7 +1235,6 @@ local function startSpectating(targetPlayer)
     end
 end
 
--- ===================== AUTO GRAB GUN =====================
 local function autoGrabGun()
     if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return end
     if LocalPlayer.Backpack:FindFirstChild("Gun") or LocalPlayer.Character:FindFirstChild("Gun") then return end
@@ -1268,7 +1255,6 @@ local function autoGrabGun()
     end
 end
 
--- ===================== AUTO SHOOT =====================
 local lastShotTime = 0
 local SHOOT_COOLDOWN = 0.3
 local autoEquippedGun = false
@@ -1365,7 +1351,6 @@ local function shootAtVector3(targetVector3)
     end
 end
 
--- ===================== NAV UTILITIES =====================
 local function isDirectLineClear(fromPos, toPos, ignoreChar)
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -1449,7 +1434,6 @@ local function findClimbableNear(char, centerPos, radius, minY, maxY)
     return best
 end
 
--- ===================== UNIFIED PATH EXECUTION =====================
 local pathState = {
     currentPath = nil,
     currentWaypoints = {},
@@ -1523,6 +1507,7 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
 
     if waypointIndex > #waypoints then return "arrived", waypointIndex end
 
+    -- Proactive jump for navmesh jump waypoints (no MoveTo same frame)
     for i = waypointIndex, math.min(waypointIndex + 1, #waypoints) do
         local wp = waypoints[i]
         if wp.Action == Enum.PathWaypointAction.Jump then
@@ -1531,6 +1516,7 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
                 hum.Jump = true
                 pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                 pathState.lastJumpTime = now
+                return "walking", waypointIndex  -- RETURN, don't MoveTo
             end
             break
         end
@@ -1574,34 +1560,37 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
         end
     end
 
-    local toTarget = nextWp.Position - myPos
-    toTarget = Vector3.new(toTarget.X, 0, toTarget.Z)
-    if toTarget.Magnitude > 0.5 then
-        if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
-            if (now - pathState.lastJumpTime) > 0.5 then
-                hum.Jump = true
-                pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-                pathState.lastJumpTime = now
-            end
+    -- Obstacle jump: if jump, RETURN (don't MoveTo same frame)
+    if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
+        if (now - pathState.lastJumpTime) > 0.5 then
+            hum.Jump = true
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+            pathState.lastJumpTime = now
+            return "walking", waypointIndex  -- RETURN, skip MoveTo
         end
-        local horizVel = Vector3.new(
-            myRoot.AssemblyLinearVelocity.X, 0, myRoot.AssemblyLinearVelocity.Z
-        ).Magnitude
-        if pathState.lastHorizVel > 4 and horizVel < 1 then
+    end
+
+    -- Stalled-velocity jump: also return if we jump
+    local horizVel = Vector3.new(
+        myRoot.AssemblyLinearVelocity.X, 0, myRoot.AssemblyLinearVelocity.Z
+    ).Magnitude
+    if pathState.lastHorizVel > 4 and horizVel < 1 then
+        if (now - pathState.lastJumpTime) > 0.6 then
             if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
                 hum.Jump = true
                 pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                 pathState.lastJumpTime = now
+                pathState.lastHorizVel = horizVel
+                return "walking", waypointIndex  -- RETURN, skip MoveTo
             end
         end
-        pathState.lastHorizVel = horizVel
     end
+    pathState.lastHorizVel = horizVel
 
     hum:MoveTo(waypoints[steerIdx].Position)
     return "walking", waypointIndex
 end
 
--- ===================== ALIVE / RESPAWN GATE =====================
 local lastSpawnTime = 0
 local SPAWN_SETTLE = 1.0
 
@@ -1734,6 +1723,7 @@ local function startMurdererAutoPlay()
                         hum.Jump = true
                         pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                         pathState.lastJumpTime = now
+                        return  -- don't MoveTo this frame
                     end
                 end
                 hum:MoveTo(targetPos)
@@ -1758,9 +1748,11 @@ local function startMurdererAutoPlay()
         elseif tick() - stuckCheckTime >= 0.6 then
             if (myPos - stuckCheckPos).Magnitude < 1.5 then
                 stuckCounter = stuckCounter + 1
-                hum.Jump = true
-                pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-                pathState.lastJumpTime = now
+                if (now - pathState.lastJumpTime) > 0.6 then
+                    hum.Jump = true
+                    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+                    pathState.lastJumpTime = now
+                end
                 if stuckCounter >= 3 then
                     lastUnreachableTarget = target.Name
                     lastUnreachableTime = now
@@ -1777,11 +1769,13 @@ local function startMurdererAutoPlay()
         end
 
         if canDirectChase then
+            -- aggressive jump for elevated target: return on jump frame
             if verticalGap > 1.5 and (now - pathState.lastJumpTime) > 0.5 then
                 if shouldJumpOverObstacle(char, hum, myRoot, targetPos) or verticalGap > 2 then
                     hum.Jump = true
                     pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                     pathState.lastJumpTime = now
+                    return  -- don't MoveTo, jump frame
                 end
             end
             hum:MoveTo(targetPos)
@@ -1865,7 +1859,7 @@ local function startMurdererAutoPlay()
     end)
 end
 
--- ===================== INNOCENT CANDY FARM (AVOIDS MURDERER) =====================
+-- ===================== INNOCENT CANDY FARM =====================
 local CandyActive = false
 local candyConnection = nil
 
@@ -1950,12 +1944,10 @@ local function findBestCandy(myPos, murdererPos, now)
             local distFromMurderer = 999
             if murdererPos then
                 distFromMurderer = (pos - murdererPos).Magnitude
-                -- Hard skip: candy is in the murderer's kill zone
                 if distFromMurderer < CANDY_MURDERER_EXCLUDE then
                     continue
                 end
             end
-            -- Score: far from murderer, near me
             local score = distFromMurderer - 0.3 * distFromMe
             if score > bestScore then
                 bestScore = score
@@ -1992,7 +1984,6 @@ local function startCandyFarm()
         local myPos = myRoot.Position
         local now = tick()
 
-        -- Get murderer position
         local murdererPos = nil
         local murdererPlayer = Murder and Players:FindFirstChild(Murder)
         if murdererPlayer and murdererPlayer.Character then
@@ -2000,7 +1991,6 @@ local function startCandyFarm()
             if mRoot then murdererPos = mRoot.Position end
         end
 
-        -- Abandon current target if murderer got close to it
         if candyCurrentTargetPart and candyCurrentTargetPart.Parent and murdererPos then
             local candyToMurderer = (candyCurrentTargetPart.Position - murdererPos).Magnitude
             if candyToMurderer < CANDY_MURDERER_ABANDON then
@@ -2039,9 +2029,12 @@ local function startCandyFarm()
         elseif (now - candyStuckTime) >= 0.6 then
             if (myPos - candyStuckPos).Magnitude < 1.5 then
                 candyStuckCounter = candyStuckCounter + 1
-                hum.Jump = true
-                pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-                candyLastJumpTime = now
+                -- Only jump if not jumped recently
+                if (now - candyLastJumpTime) > 0.6 then
+                    hum.Jump = true
+                    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+                    candyLastJumpTime = now
+                end
                 if candyStuckCounter >= 3 then
                     candyBadTarget = target
                     candyBadTargetTime = now
@@ -2067,11 +2060,13 @@ local function startCandyFarm()
         local canDirect = visible and sameLevel and distToTarget >= CANDY_MIN_DIRECT_DIST
 
         if canDirect then
+            -- If jump needed, RETURN without MoveTo
             if shouldJumpOverObstacle(char, hum, myRoot, targetPos) then
                 if (now - candyLastJumpTime) > 0.5 then
                     hum.Jump = true
                     pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                     candyLastJumpTime = now
+                    return  -- don't MoveTo this frame
                 end
             end
             hum:MoveTo(targetPos)
@@ -2156,6 +2151,7 @@ local function startCandyFarm()
             return
         end
 
+        -- Navmesh jump waypoint: jump + RETURN
         for i = candyWpIndex, math.min(candyWpIndex + 1, #candyWaypoints) do
             local wp = candyWaypoints[i]
             if wp.Action == Enum.PathWaypointAction.Jump then
@@ -2166,6 +2162,7 @@ local function startCandyFarm()
                     hum.Jump = true
                     pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                     candyLastJumpTime = now
+                    return  -- don't MoveTo
                 end
                 break
             end
@@ -2209,15 +2206,13 @@ local function startCandyFarm()
             end
         end
 
-        local toT = nextWp.Position - myPos
-        toT = Vector3.new(toT.X, 0, toT.Z)
-        if toT.Magnitude > 0.5 then
-            if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
-                if (now - candyLastJumpTime) > 0.5 then
-                    hum.Jump = true
-                    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-                    candyLastJumpTime = now
-                end
+        -- Obstacle jump: jump + RETURN
+        if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
+            if (now - candyLastJumpTime) > 0.5 then
+                hum.Jump = true
+                pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+                candyLastJumpTime = now
+                return  -- don't MoveTo
             end
         end
 
@@ -2225,7 +2220,6 @@ local function startCandyFarm()
     end)
 end
 
--- ===================== HELPER SYSTEM =====================
 local lastSpectateState = { sheriff = false, murderer = false }
 local lastNotifiedPerk = nil
 local lastMurderer = nil
@@ -2326,7 +2320,6 @@ local function updateHelper()
     end
 end
 
--- ===================== AUTO SHOOT LOOP =====================
 RunService.RenderStepped:Connect(function()
     if not Config.Combat.AutoShootMurderer then return end
     local myChar = LocalPlayer.Character
@@ -2369,7 +2362,6 @@ LocalPlayer.CharacterAdded:Connect(function()
     currentGunObject = nil
 end)
 
--- ===================== SPAWN TELEPORT =====================
 RunService.Stepped:Connect(function()
     if not Config.Movement.TeleportSpawn then return end
     local char = LocalPlayer.Character
@@ -2380,7 +2372,6 @@ RunService.Stepped:Connect(function()
     char.HumanoidRootPart.CFrame = CFrame.new(70, 84, 46)
 end)
 
--- ===================== KILL SCRIPT =====================
 killScript = function()
     scriptKilled = true
     stopAutoPlay()
@@ -2400,7 +2391,6 @@ killScript = function()
     Notify("Script Killed", "MM2 Script has been unloaded.")
 end
 
--- ===================== UPDATE LOOPS =====================
 addThread(task.spawn(function()
     while not scriptKilled do task.wait(1); pcall(updateRoles) end
 end))
@@ -2434,5 +2424,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.11.2 - candy farm avoids murderer", 5)
-warn("[MM2] v4.11.2 ready")
+Notify("MM2 Script", "Loaded! v4.11.3 - jump/MoveTo conflict fixed", 5)
+warn("[MM2] v4.11.3 ready")

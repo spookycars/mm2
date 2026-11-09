@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.11.1  (no doorway jumps, no spawn-jump, no log GUI)
+    Version: 4.11.2  (candy farm avoids murderer-adjacent candies)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -323,7 +323,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.11.1"
+    title.Text = "MM2 Script  -  v4.11.2"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -1465,8 +1465,6 @@ local function resetPathState()
     pathState.lastHorizVel = 0
 end
 
--- FIXED obstacle jump: rejects doorways/archways by checking for
--- solid geometry ABOVE the obstacle.
 local function shouldJumpOverObstacle(char, hum, myRoot, moveTarget)
     if not moveTarget then return false end
     local myPos = myRoot.Position
@@ -1477,31 +1475,21 @@ local function shouldJumpOverObstacle(char, hum, myRoot, moveTarget)
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
     rayParams.FilterDescendantsInstances = {char, Camera}
-
-    -- Probe at chest height (2.5 studs) forward 2.5 studs
     local chestStart = myPos + Vector3.new(0, 2.5, 0)
     local hit = workspace:Raycast(chestStart, dir * 2.5, rayParams)
     if not hit or not hit.Instance then return false end
     if hit.Instance.CanCollide == false then return false end
-
-    -- How tall is the obstacle?
     local topProbeStart = hit.Position + Vector3.new(0, 8, 0)
     local topHit = workspace:Raycast(topProbeStart, Vector3.new(0, -12, 0), rayParams)
     if not topHit then return false end
     local obstacleHeight = topHit.Position.Y - myPos.Y
-    if obstacleHeight > 3.5 then return false end  -- lowered: only low steps/crates
-
-    -- KEY FIX: if there's solid geometry above the obstacle, it's a doorway/arch,
-    -- NOT a jumpable obstacle. Doorways have frames above; crates don't.
+    if obstacleHeight > 3.5 then return false end
     local aboveStart = topHit.Position + Vector3.new(0, 0.5, 0)
     local aboveHit = workspace:Raycast(aboveStart, Vector3.new(0, 5, 0), rayParams)
     if aboveHit then return false end
-
-    -- Landing floor check
     local beyondStart = hit.Position + dir * 2 + Vector3.new(0, 3, 0)
     local floorBeyond = workspace:Raycast(beyondStart, Vector3.new(0, -8, 0), rayParams)
     if not floorBeyond then return false end
-
     return true
 end
 
@@ -1614,8 +1602,6 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
 end
 
 -- ===================== ALIVE / RESPAWN GATE =====================
--- Prevents jump-on-respawn by requiring the humanoid to be alive and not in
--- the Dead/Physics/Seated state, and requiring a settle delay after respawn.
 local lastSpawnTime = 0
 local SPAWN_SETTLE = 1.0
 
@@ -1879,7 +1865,7 @@ local function startMurdererAutoPlay()
     end)
 end
 
--- ===================== INNOCENT CANDY FARM (CHASE) =====================
+-- ===================== INNOCENT CANDY FARM (AVOIDS MURDERER) =====================
 local CandyActive = false
 local candyConnection = nil
 
@@ -1887,7 +1873,6 @@ local candyPath = nil
 local candyWaypoints = {}
 local candyWpIndex = 1
 local candyLastJumpTime = 0
-local candyLastHorizVel = 0
 local candyLastPathAttempt = 0
 local candyPathFailed = false
 local candyLastFailedTargetPos = nil
@@ -1904,6 +1889,8 @@ local CANDY_FAILED_RETRY_COOLDOWN = 2.0
 local CANDY_MIN_DIRECT_DIST = 4
 local CANDY_BAD_COOLDOWN = 5.0
 local CANDY_REACH_DIST = 6
+local CANDY_MURDERER_EXCLUDE = 30
+local CANDY_MURDERER_ABANDON = 40
 
 local function resetCandyState()
     candyPath = nil
@@ -1951,29 +1938,39 @@ local function isCandyPart(part)
     return false
 end
 
-local function findNearestCandy(myPos, ignoreChar, now)
-    local best, bestDist = nil, math.huge
+local function findBestCandy(myPos, murdererPos, now)
+    local best, bestScore = nil, -math.huge
     for _, d in ipairs(workspace:GetDescendants()) do
         if isCandyPart(d) then
             if d == candyBadTarget and (now - candyBadTargetTime) < CANDY_BAD_COOLDOWN then
                 continue
             end
             local pos = d.Position
-            local dist = (pos - myPos).Magnitude
-            if dist < bestDist then
-                bestDist = dist
+            local distFromMe = (pos - myPos).Magnitude
+            local distFromMurderer = 999
+            if murdererPos then
+                distFromMurderer = (pos - murdererPos).Magnitude
+                -- Hard skip: candy is in the murderer's kill zone
+                if distFromMurderer < CANDY_MURDERER_EXCLUDE then
+                    continue
+                end
+            end
+            -- Score: far from murderer, near me
+            local score = distFromMurderer - 0.3 * distFromMe
+            if score > bestScore then
+                bestScore = score
                 best = d
             end
         end
     end
-    return best, bestDist
+    return best
 end
 
 local function startCandyFarm()
     if candyConnection then return end
     CandyActive = true
     resetCandyState()
-    Notify("Candy Farm", "Chasing nearest candy/coin", 3)
+    Notify("Candy Farm", "Chasing safe candies (avoiding murderer)", 3)
 
     candyConnection = RunService.Heartbeat:Connect(function()
         if not CandyActive then return end
@@ -1995,9 +1992,28 @@ local function startCandyFarm()
         local myPos = myRoot.Position
         local now = tick()
 
+        -- Get murderer position
+        local murdererPos = nil
+        local murdererPlayer = Murder and Players:FindFirstChild(Murder)
+        if murdererPlayer and murdererPlayer.Character then
+            local mRoot = murdererPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if mRoot then murdererPos = mRoot.Position end
+        end
+
+        -- Abandon current target if murderer got close to it
+        if candyCurrentTargetPart and candyCurrentTargetPart.Parent and murdererPos then
+            local candyToMurderer = (candyCurrentTargetPart.Position - murdererPos).Magnitude
+            if candyToMurderer < CANDY_MURDERER_ABANDON then
+                candyBadTarget = candyCurrentTargetPart
+                candyBadTargetTime = now
+                candyCurrentTargetPart = nil
+                resetCandyState()
+            end
+        end
+
         local target = candyCurrentTargetPart
         if not target or not target.Parent then
-            local found, dist = findNearestCandy(myPos, char, now)
+            local found = findBestCandy(myPos, murdererPos, now)
             if not found then
                 if hum.MoveDirection.Magnitude > 0 then
                     hum:Move(Vector3.zero)
@@ -2418,5 +2434,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.11.1 - no doorway jumps, no spawn-jump", 5)
-warn("[MM2] v4.11.1 ready")
+Notify("MM2 Script", "Loaded! v4.11.2 - candy farm avoids murderer", 5)
+warn("[MM2] v4.11.2 ready")

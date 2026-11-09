@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.11.5  (proper head-clearance check — jumps low obstacles even with ceiling)
+    Version: 4.11.6  (stuck-counter jump gated behind obstacle check; no blind-jump on elevated targets)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -316,7 +316,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.11.5"
+    title.Text = "MM2 Script  -  v4.11.6"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -1449,20 +1449,6 @@ local function resetPathState()
     pathState.lastHorizVel = 0
 end
 
--- ===================== OBSTACLE JUMP (correct logic) =====================
--- The question is: "Is there a low obstacle directly in front that I can
--- physically clear by jumping?"
-
--- The conditions are INDEPENDENT:
---   1. There IS an obstacle ahead at chest height (ray forward hits something)
---   2. The TOP of that obstacle is only 1-3 studs above my feet (low enough to
---      jump over — the humanoid jump clears ~5-6 studs so anything under 3 is
---      safe)
---   3. There IS floor on the other side of the obstacle (not a cliff)
---   4. There is NO ceiling within jump height above my head (else I hit it)
-
--- Note: an overhead ceiling above the OBSTACLE is completely fine — the
--- obstacle's own top is what we're jumping OVER, not under.
 local function shouldJumpOverObstacle(char, hum, myRoot, moveTarget)
     if not moveTarget then return false end
     local myPos = myRoot.Position
@@ -1474,27 +1460,21 @@ local function shouldJumpOverObstacle(char, hum, myRoot, moveTarget)
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
     rayParams.FilterDescendantsInstances = {char, Camera}
 
-    -- Condition 4: is there head-clearance to jump? If a ceiling is within
-    -- ~8 studs of my head, jumping would bang into it.
     local headStart = myPos + Vector3.new(0, 5, 0)
     local headHit = workspace:Raycast(headStart, Vector3.new(0, 8, 0), rayParams)
     if headHit then return false end
 
-    -- Condition 1: obstacle ahead
     local chestStart = myPos + Vector3.new(0, 2.5, 0)
     local hit = workspace:Raycast(chestStart, dir * 2.5, rayParams)
     if not hit or not hit.Instance then return false end
     if hit.Instance.CanCollide == false then return false end
 
-    -- Condition 2: how tall is the obstacle?
     local topProbeStart = hit.Position + Vector3.new(0, 8, 0)
     local topHit = workspace:Raycast(topProbeStart, Vector3.new(0, -12, 0), rayParams)
     if not topHit then return false end
     local obstacleHeight = topHit.Position.Y - myPos.Y
-    -- Only jump over genuinely LOW obstacles (steps, small boxes, curbs)
     if obstacleHeight > 3 then return false end
 
-    -- Condition 3: landing floor beyond the obstacle
     local beyondStart = hit.Position + dir * 2 + Vector3.new(0, 3, 0)
     local floorBeyond = workspace:Raycast(beyondStart, Vector3.new(0, -8, 0), rayParams)
     if not floorBeyond then return false end
@@ -1769,7 +1749,8 @@ local function startMurdererAutoPlay()
         elseif tick() - stuckCheckTime >= 0.6 then
             if (myPos - stuckCheckPos).Magnitude < 1.5 then
                 stuckCounter = stuckCounter + 1
-                if (now - pathState.lastJumpTime) > 0.6 then
+                -- Only jump if there's actually an obstacle to jump over
+                if (now - pathState.lastJumpTime) > 0.6 and shouldJumpOverObstacle(char, hum, myRoot, targetPos) then
                     hum.Jump = true
                     pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                     pathState.lastJumpTime = now
@@ -1790,8 +1771,9 @@ local function startMurdererAutoPlay()
         end
 
         if canDirectChase then
+            -- Only jump if there's actually an obstacle ahead (no blind vertical jump)
             if verticalGap > 1.5 and (now - pathState.lastJumpTime) > 0.5 then
-                if shouldJumpOverObstacle(char, hum, myRoot, targetPos) or verticalGap > 2 then
+                if shouldJumpOverObstacle(char, hum, myRoot, targetPos) then
                     hum.Jump = true
                     pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                     pathState.lastJumpTime = now
@@ -1879,7 +1861,6 @@ local function startMurdererAutoPlay()
     end)
 end
 
--- ===================== INNOCENT CANDY FARM =====================
 local CandyActive = false
 local candyConnection = nil
 
@@ -2049,7 +2030,8 @@ local function startCandyFarm()
         elseif (now - candyStuckTime) >= 0.6 then
             if (myPos - candyStuckPos).Magnitude < 1.5 then
                 candyStuckCounter = candyStuckCounter + 1
-                if (now - candyLastJumpTime) > 0.6 then
+                -- Only jump if there's actually an obstacle to jump over
+                if (now - candyLastJumpTime) > 0.6 and shouldJumpOverObstacle(char, hum, myRoot, targetPos) then
                     hum.Jump = true
                     pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
                     candyLastJumpTime = now
@@ -2440,5 +2422,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.11.5 - proper obstacle jump detection", 5)
-warn("[MM2] v4.11.5 ready")
+Notify("MM2 Script", "Loaded! v4.11.6 - no blind jumps", 5)
+warn("[MM2] v4.11.6 ready")

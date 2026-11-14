@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.14.3  (innocent avoids murderer on route, not just destination)
+    Version: 4.14.4  (trail pool innocent + route-aware + ESP rebuild-every-frame)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -349,7 +349,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.14.3"
+    title.Text = "MM2 Script  -  v4.14.4"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -1469,9 +1469,6 @@ local function collectPositions(now)
     end
 end
 
--- Does the straight line from `fromPos` to `toPos` pass within `radius`
--- studs of `threatPos`? Used to reject destinations whose route walks
--- past the murderer.
 local function routePassesNearThreat(fromPos, toPos, threatPos, radius)
     local toTarget = toPos - fromPos
     local dist = toTarget.Magnitude
@@ -1484,8 +1481,6 @@ local function routePassesNearThreat(fromPos, toPos, threatPos, radius)
     return routeDist < radius
 end
 
--- Pick the cell that (a) is far from murderer AND (b) doesn't require
--- routing past the murderer. Returns nil if no safe cell exists.
 local function pickSafestCell(murdererPos, myPos)
     local now = tick()
     local myDistFromMurderer = (myPos - murdererPos).Magnitude
@@ -1623,7 +1618,6 @@ local function startInnocentAutoPlay()
         if not mRoot then return end
         local murdererPos = mRoot.Position
 
-        -- Emergency dodge
         if currentTargetPos then
             local murderDistToMe = (myPos - murdererPos).Magnitude
             local murderDistToTarget = (murdererPos - currentTargetPos).Magnitude
@@ -1689,7 +1683,6 @@ local function startInnocentAutoPlay()
             return
         end
 
-        -- Re-check: has the murderer moved into our next route segment?
         if pathState.currentWaypoints and #pathState.currentWaypoints > 1 then
             local wp = pathState.currentWaypoints[pathState.currentWaypointIndex]
             if wp then
@@ -2036,7 +2029,7 @@ end
 if Config.Movement.TeleportSpawn then createSpawnBarrier() end
 if Config.Helper.TriggerTraps then startTrapTrigger() end
 
--- ===================== ESP (PlayerGui-based, safe iteration) =====================
+-- ===================== ESP (rebuild every frame, survives round-ends) =====================
 local espFolder = Instance.new("Folder")
 espFolder.Name = "MM2_ESPData"
 espFolder.Parent = PlayerGui
@@ -2047,171 +2040,89 @@ local gunEspFolder = Instance.new("Folder")
 gunEspFolder.Name = "MM2_GunESPData"
 gunEspFolder.Parent = PlayerGui
 
-local espBillboards = {}
-local espHighlights = {}
-local gunBillboards = {}
-
-local function cleanupPlayerESP(playerName)
-    local bb = espBillboards[playerName]
-    if bb then
-        espBillboards[playerName] = nil
-        bb:Destroy()
-    end
-    local hl = espHighlights[playerName]
-    if hl then
-        espHighlights[playerName] = nil
-        hl:Destroy()
-    end
-end
-
-local function clearAllPlayerESP()
-    local keys = {}
-    for name in pairs(espBillboards) do table.insert(keys, name) end
-    for _, name in ipairs(keys) do cleanupPlayerESP(name) end
-end
-
-local function clearAllGunESP()
-    local keys = {}
-    for part in pairs(gunBillboards) do table.insert(keys, part) end
-    for _, part in ipairs(keys) do
-        local bb = gunBillboards[part]
-        gunBillboards[part] = nil
-        if bb then bb:Destroy() end
-    end
-end
-
 local function updateESP()
-    if not Config.ESP.Enabled then
-        clearAllPlayerESP()
-        clearAllGunESP()
-        return
+    if not espFolder or not espFolder.Parent then
+        espFolder = Instance.new("Folder")
+        espFolder.Name = "MM2_ESPData"
+        espFolder.Parent = PlayerGui
+    end
+    if not chamFolder or not chamFolder.Parent then
+        chamFolder = Instance.new("Folder")
+        chamFolder.Name = "MM2_ChamData"
+        chamFolder.Parent = PlayerGui
+    end
+    if not gunEspFolder or not gunEspFolder.Parent then
+        gunEspFolder = Instance.new("Folder")
+        gunEspFolder.Name = "MM2_GunESPData"
+        gunEspFolder.Parent = PlayerGui
     end
 
-    local meChar = LocalPlayer.Character
-    if not meChar or not meChar:FindFirstChild("HumanoidRootPart") then
-        clearAllPlayerESP()
-        clearAllGunESP()
-        return
-    end
+    for _, v in pairs(espFolder:GetChildren()) do v:Destroy() end
+    for _, v in pairs(chamFolder:GetChildren()) do v:Destroy() end
+    for _, v in pairs(gunEspFolder:GetChildren()) do v:Destroy() end
 
-    local seen = {}
+    if not Config.ESP.Enabled then return end
+    if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return end
+
     for _, player in pairs(Players:GetPlayers()) do
         if player == LocalPlayer then continue end
-        if not player.Character then continue end
-        local head = player.Character:FindFirstChild("Head")
-        if not head then continue end
-
+        if not player.Character or not player.Character:FindFirstChild("Head") then continue end
         local role, color = getRole(player)
-        local show = true
-        if role == "Murderer" and not Config.ESP.ShowMurderer then show = false end
-        if role == "Sheriff" and not Config.ESP.ShowSheriff then show = false end
-        if role == "Innocent" and not Config.ESP.ShowInnocent then show = false end
-        if not IsAlive(player) then
-            color = Color3.fromRGB(128, 128, 128)
-        end
-        if not show then continue end
-
-        seen[player.Name] = true
-
-        local bb = espBillboards[player.Name]
-        if not bb or not bb.Parent then
-            bb = Instance.new("BillboardGui")
-            bb.Name = "MM2_ESP_" .. player.Name
-            bb.Size = UDim2.new(0, 200, 0, 24)
-            bb.StudsOffset = Vector3.new(0, 2.5, 0)
-            bb.AlwaysOnTop = true
-            bb.MaxDistance = math.huge
-            bb.Parent = espFolder
-
-            local lbl = Instance.new("TextLabel")
-            lbl.Name = "NameLabel"
-            lbl.Size = UDim2.new(1, 0, 1, 0)
-            lbl.BackgroundTransparency = 1
-            lbl.TextStrokeTransparency = 0
-            lbl.Font = Enum.Font.GothamBold
-            lbl.TextSize = 14
-            lbl.Parent = bb
-
-            espBillboards[player.Name] = bb
-        end
-
-        bb.Adornee = head
-        local lbl = bb:FindFirstChild("NameLabel")
-        if lbl then
-            lbl.TextColor3 = color
-            lbl.Text = player.Name
-        end
+        if role == "Murderer" and not Config.ESP.ShowMurderer then continue end
+        if role == "Sheriff" and not Config.ESP.ShowSheriff then continue end
+        if role == "Innocent" and not Config.ESP.ShowInnocent then continue end
+        if not IsAlive(player) then color = Color3.fromRGB(128, 128, 128) end
 
         if Config.ESP.Chams then
-            local hl = espHighlights[player.Name]
-            if not hl or not hl.Parent then
-                hl = Instance.new("Highlight")
-                hl.Name = "MM2_Cham_" .. player.Name
-                hl.FillTransparency = 1
-                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                hl.Parent = chamFolder
-                espHighlights[player.Name] = hl
-            end
-            hl.Adornee = player.Character
-            hl.OutlineColor = color
-        else
-            local hl = espHighlights[player.Name]
-            if hl then
-                espHighlights[player.Name] = nil
-                hl:Destroy()
-            end
+            local cham = Instance.new("Highlight")
+            cham.Name = player.Name
+            cham.FillTransparency = 1
+            cham.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            cham.OutlineColor = color
+            cham.Adornee = player.Character
+            cham.Parent = chamFolder
         end
-    end
 
-    local staleKeys = {}
-    for name in pairs(espBillboards) do
-        if not seen[name] then table.insert(staleKeys, name) end
-    end
-    for _, name in ipairs(staleKeys) do
-        cleanupPlayerESP(name)
+        local billboard = Instance.new("BillboardGui")
+        billboard.Name = player.Name
+        billboard.Adornee = player.Character.Head
+        billboard.Size = UDim2.new(0, 200, 0, 24)
+        billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+        billboard.AlwaysOnTop = true
+        billboard.MaxDistance = math.huge
+        billboard.Parent = espFolder
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(1, 0, 1, 0)
+        label.BackgroundTransparency = 1
+        label.TextStrokeTransparency = 0
+        label.Font = Enum.Font.GothamBold
+        label.TextSize = 14
+        label.TextColor3 = color
+        label.Text = player.Name
+        label.Parent = billboard
     end
 
     if Config.ESP.GunESP then
-        local seenGuns = {}
-        for _, desc in ipairs(Workspace:GetDescendants()) do
+        for _, desc in pairs(Workspace:GetDescendants()) do
             if desc:IsA("BasePart") and desc.Name == "GunDrop" then
-                seenGuns[desc] = true
-                local existing = gunBillboards[desc]
-                if not existing or not existing.Parent then
-                    local bb = Instance.new("BillboardGui")
-                    bb.Name = "MM2_GunESP"
-                    bb.Adornee = desc
-                    bb.Size = UDim2.new(0, 200, 0, 24)
-                    bb.StudsOffset = Vector3.new(0, 2, 0)
-                    bb.AlwaysOnTop = true
-                    bb.MaxDistance = math.huge
-                    bb.Parent = gunEspFolder
-
-                    local lbl = Instance.new("TextLabel")
-                    lbl.Size = UDim2.new(1, 0, 1, 0)
-                    lbl.BackgroundTransparency = 1
-                    lbl.TextStrokeTransparency = 0
-                    lbl.Font = Enum.Font.GothamBold
-                    lbl.TextSize = 14
-                    lbl.TextColor3 = Color3.fromRGB(255, 255, 0)
-                    lbl.Text = "Dropped Gun"
-                    lbl.Parent = bb
-
-                    gunBillboards[desc] = bb
-                end
+                local billboard = Instance.new("BillboardGui")
+                billboard.Adornee = desc
+                billboard.Size = UDim2.new(0, 200, 0, 24)
+                billboard.StudsOffset = Vector3.new(0, 2, 0)
+                billboard.AlwaysOnTop = true
+                billboard.MaxDistance = math.huge
+                billboard.Parent = gunEspFolder
+                local label = Instance.new("TextLabel")
+                label.Size = UDim2.new(1, 0, 1, 0)
+                label.BackgroundTransparency = 1
+                label.TextStrokeTransparency = 0
+                label.Font = Enum.Font.GothamBold
+                label.TextSize = 14
+                label.TextColor3 = Color3.fromRGB(255, 255, 0)
+                label.Text = "Dropped Gun"
+                label.Parent = billboard
             end
         end
-        local staleGuns = {}
-        for gunPart in pairs(gunBillboards) do
-            if not seenGuns[gunPart] then table.insert(staleGuns, gunPart) end
-        end
-        for _, gunPart in ipairs(staleGuns) do
-            local bb = gunBillboards[gunPart]
-            gunBillboards[gunPart] = nil
-            if bb then bb:Destroy() end
-        end
-    else
-        clearAllGunESP()
     end
 end
 
@@ -2511,17 +2422,12 @@ killScript = function()
     stopTrapTrigger()
     destroySpawnBarrier()
     stopSpectating()
-    for name, _ in pairs(espBillboards) do cleanupPlayerESP(name) end
-    for gunPart, bb in pairs(gunBillboards) do bb:Destroy() end
-    gunBillboards = {}
-    espBillboards = {}
-    espHighlights = {}
     for _, conn in ipairs(connections) do pcall(function() conn:Disconnect() end) end
     for _, t in ipairs(threads) do pcall(function() task.cancel(t) end) end
     pcall(function() UI.ScreenGui:Destroy() end)
-    pcall(function() espFolder:Destroy() end)
-    pcall(function() chamFolder:Destroy() end)
-    pcall(function() gunEspFolder:Destroy() end)
+    if espFolder and espFolder.Parent then espFolder:Destroy() end
+    if chamFolder and chamFolder.Parent then chamFolder:Destroy() end
+    if gunEspFolder and gunEspFolder.Parent then gunEspFolder:Destroy() end
     if Config.Visuals.FullBright then
         Lighting.Brightness = 1; Lighting.ClockTime = 14; Lighting.FogEnd = 1000
         Lighting.GlobalShadows = true
@@ -2563,5 +2469,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.14.3 - route-aware innocent", 5)
-warn("[MM2] v4.14.3 ready")
+Notify("MM2 Script", "Loaded! v4.14.4 - route-aware innocent + stable ESP", 5)
+warn("[MM2] v4.14.4 ready")

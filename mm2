@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.14.2  (faster trail pool, quicker reactions)
+    Version: 4.14.3  (innocent avoids murderer on route, not just destination)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -349,7 +349,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.14.2"
+    title.Text = "MM2 Script  -  v4.14.3"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -714,7 +714,7 @@ local function stopTrapTrigger()
     trapProcessing = false
 end
 
--- ===================== FLING (KILASIK) =====================
+-- ===================== FLING =====================
 getgenv().OldPos = nil
 getgenv().FPDH = workspace.FallenPartsDestroyHeight
 local FlingActive = false
@@ -1391,7 +1391,7 @@ local function startMurdererAutoPlay()
     end
 end
 
--- ===================== INNOCENT TRAIL POOL AUTOPLAY (v4.14.2 FAST) =====================
+-- ===================== INNOCENT TRAIL POOL AUTOPLAY =====================
 local trailFollowActive = false
 local trailFollowConnection = nil
 
@@ -1399,24 +1399,21 @@ local trailPool = {}
 local poolLastPrune = 0
 local nextAppend = 0
 local lastScanTime = 0
-local firstScanDone = false
+local startFollowTime = 0
 
--- Tighter tuning
-local CELL_SIZE = 8               -- was 12
-local POOL_MAX_AGE = 15           -- was 20
-local APPEND_INTERVAL_WARMUP = 0.1  -- 10Hz during first 3s
-local APPEND_INTERVAL_NORMAL = 0.3  -- ~3Hz after
+local CELL_SIZE = 8
+local POOL_MAX_AGE = 15
+local APPEND_INTERVAL_WARMUP = 0.1
+local APPEND_INTERVAL_NORMAL = 0.3
 local WARMUP_DURATION = 3.0
-local SCAN_INTERVAL = 0.7         -- was 1.5
-local TOP_CANDIDATES_TO_VALIDATE = 3  -- was 30
+local SCAN_INTERVAL = 0.7
+local TOP_CANDIDATES_TO_VALIDATE = 3
 local BLACKLIST_COOLDOWN = 2.5
-local ARRIVE_WAIT = 0.3           -- was 1.0
+local ARRIVE_WAIT = 0.3
 local MURDERER_THREAT_RADIUS = 30
 
 local blacklistedCells = {}
 local cellFailCounts = {}
-
-local startFollowTime = 0
 
 local function cellKey(pos)
     local gx = math.floor(pos.X / CELL_SIZE)
@@ -1472,30 +1469,89 @@ local function collectPositions(now)
     end
 end
 
--- Pick the top N candidates (sorted by distance from murderer)
--- then validate only those N. No more 30-candidate blocking.
+-- Does the straight line from `fromPos` to `toPos` pass within `radius`
+-- studs of `threatPos`? Used to reject destinations whose route walks
+-- past the murderer.
+local function routePassesNearThreat(fromPos, toPos, threatPos, radius)
+    local toTarget = toPos - fromPos
+    local dist = toTarget.Magnitude
+    if dist < 0.5 then return false end
+    local toThreat = threatPos - fromPos
+    local proj = toThreat:Dot(toTarget.Unit)
+    if proj < 2 or proj > (dist - 2) then return false end
+    local closestPoint = fromPos + toTarget.Unit * proj
+    local routeDist = (threatPos - closestPoint).Magnitude
+    return routeDist < radius
+end
+
+-- Pick the cell that (a) is far from murderer AND (b) doesn't require
+-- routing past the murderer. Returns nil if no safe cell exists.
 local function pickSafestCell(murdererPos, myPos)
     local now = tick()
+    local myDistFromMurderer = (myPos - murdererPos).Magnitude
     local candidates = {}
+
     for key, entry in pairs(trailPool) do
         if (now - entry.t) > POOL_MAX_AGE then continue end
         if blacklistedCells[key] and blacklistedCells[key] > now then continue end
         if (entry.pos - myPos).Magnitude < CELL_SIZE then continue end
-        local d = (entry.pos - murdererPos).Magnitude
-        table.insert(candidates, { key = key, pos = entry.pos, dist = d })
+
+        local distFromMurderer = (entry.pos - murdererPos).Magnitude
+
+        if distFromMurderer < 20 then continue end
+
+        local threatRadius = myDistFromMurderer < 40 and 30 or 22
+        if routePassesNearThreat(myPos, entry.pos, murdererPos, threatRadius) then
+            continue
+        end
+
+        if myDistFromMurderer > 40 and distFromMurderer < myDistFromMurderer then
+            continue
+        end
+
+        local improvement = distFromMurderer - myDistFromMurderer
+        local travelPenalty = (entry.pos - myPos).Magnitude * 0.15
+        local score = improvement - travelPenalty
+
+        table.insert(candidates, {
+            key = key,
+            pos = entry.pos,
+            dist = distFromMurderer,
+            score = score,
+        })
     end
 
-    if #candidates == 0 then return nil end
-    table.sort(candidates, function(a, b) return a.dist > b.dist end)
+    if #candidates == 0 then
+        for key, entry in pairs(trailPool) do
+            if (now - entry.t) > POOL_MAX_AGE then continue end
+            if blacklistedCells[key] and blacklistedCells[key] > now then continue end
+            local d = (entry.pos - murdererPos).Magnitude
+            if d > myDistFromMurderer + 20 then
+                table.insert(candidates, { key = key, pos = entry.pos, dist = d, score = d })
+            end
+        end
+        if #candidates == 0 then return nil end
+    end
 
-    -- Only validate top N
+    table.sort(candidates, function(a, b) return a.score > b.score end)
+
     local checkCount = math.min(TOP_CANDIDATES_TO_VALIDATE, #candidates)
     for i = 1, checkCount do
         local cand = candidates[i]
         local path, wps = computePathTo(myPos, cand.pos)
         if path and wps then
-            cellFailCounts[cand.key] = 0
-            return cand.key, cand.pos, path, wps
+            local pathIsSafe = true
+            for j = 2, #wps do
+                local wp = wps[j]
+                if (wp.Position - murdererPos).Magnitude < 15 then
+                    pathIsSafe = false
+                    break
+                end
+            end
+            if pathIsSafe then
+                cellFailCounts[cand.key] = 0
+                return cand.key, cand.pos, path, wps
+            end
         else
             cellFailCounts[cand.key] = (cellFailCounts[cand.key] or 0) + 1
             if cellFailCounts[cand.key] >= 2 then
@@ -1505,7 +1561,6 @@ local function pickSafestCell(murdererPos, myPos)
         end
     end
 
-    -- Nothing validated — fall back to walking directly to the top candidate
     local top = candidates[1]
     return top.key, top.pos, nil, nil
 end
@@ -1528,14 +1583,12 @@ local function startInnocentAutoPlay()
     poolLastPrune = 0
     lastScanTime = 0
     nextAppend = 0
-    firstScanDone = false
     startFollowTime = tick()
     resetPathState()
-    Notify("Innocent Auto", "Trail pool warming up...", 2)
+    Notify("Innocent Auto", "Trail pool warming up (route-aware)...", 2)
 
     local currentTargetPos = nil
     local targetReachedTime = 0
-    local lastDirectWalkAttempt = 0
 
     trailFollowConnection = RunService.Heartbeat:Connect(function()
         if not trailFollowActive then return end
@@ -1570,7 +1623,22 @@ local function startInnocentAutoPlay()
         if not mRoot then return end
         local murdererPos = mRoot.Position
 
-        -- If we're on target, hold briefly then re-scan
+        -- Emergency dodge
+        if currentTargetPos then
+            local murderDistToMe = (myPos - murdererPos).Magnitude
+            local murderDistToTarget = (murdererPos - currentTargetPos).Magnitude
+            local routeUnsafe = false
+            if (currentTargetPos - myPos).Magnitude > 0.5 then
+                routeUnsafe = routePassesNearThreat(myPos, currentTargetPos, murdererPos, 20)
+            end
+            if murderDistToMe < 18 or murderDistToTarget < 20 or routeUnsafe then
+                currentTargetPos = nil
+                lastScanTime = 0
+                resetPathState()
+                hum:Move(Vector3.zero)
+            end
+        end
+
         local reachedTarget = currentTargetPos and (myPos - currentTargetPos).Magnitude < 6
         if reachedTarget then
             hum:Move(Vector3.zero)
@@ -1580,7 +1648,6 @@ local function startInnocentAutoPlay()
             end
         end
 
-        -- Re-scan conditions
         local needScan = (not currentTargetPos)
             or reachedTarget
             or (now - lastScanTime) >= SCAN_INTERVAL
@@ -1597,7 +1664,6 @@ local function startInnocentAutoPlay()
                     pathState.currentWaypoints = newWps
                     pathState.currentWaypointIndex = 2
                 else
-                    -- Fallback: walk directly
                     hum:MoveTo(newPos)
                     pathState.currentPath = nil
                     pathState.currentWaypoints = {}
@@ -1623,14 +1689,25 @@ local function startInnocentAutoPlay()
             return
         end
 
-        -- If we have no path, walk directly toward target
+        -- Re-check: has the murderer moved into our next route segment?
+        if pathState.currentWaypoints and #pathState.currentWaypoints > 1 then
+            local wp = pathState.currentWaypoints[pathState.currentWaypointIndex]
+            if wp then
+                if routePassesNearThreat(myPos, wp.Position, murdererPos, 15) then
+                    currentTargetPos = nil
+                    lastScanTime = 0
+                    resetPathState()
+                    hum:Move(Vector3.zero)
+                    return
+                end
+            end
+        end
+
         if not pathState.currentPath or #pathState.currentWaypoints < 2 then
             hum:MoveTo(currentTargetPos)
-            lastDirectWalkAttempt = now
             return
         end
 
-        -- If murderer got too close to our target mid-walk, abort and re-scan
         if (murdererPos - currentTargetPos).Magnitude < MURDERER_THREAT_RADIUS then
             currentTargetPos = nil
             lastScanTime = 0
@@ -1959,7 +2036,7 @@ end
 if Config.Movement.TeleportSpawn then createSpawnBarrier() end
 if Config.Helper.TriggerTraps then startTrapTrigger() end
 
--- ===================== ESP (PlayerGui-based) =====================
+-- ===================== ESP (PlayerGui-based, safe iteration) =====================
 local espFolder = Instance.new("Folder")
 espFolder.Name = "MM2_ESPData"
 espFolder.Parent = PlayerGui
@@ -1975,50 +2052,67 @@ local espHighlights = {}
 local gunBillboards = {}
 
 local function cleanupPlayerESP(playerName)
-    if espBillboards[playerName] then
-        espBillboards[playerName]:Destroy()
+    local bb = espBillboards[playerName]
+    if bb then
         espBillboards[playerName] = nil
+        bb:Destroy()
     end
-    if espHighlights[playerName] then
-        espHighlights[playerName]:Destroy()
+    local hl = espHighlights[playerName]
+    if hl then
         espHighlights[playerName] = nil
+        hl:Destroy()
+    end
+end
+
+local function clearAllPlayerESP()
+    local keys = {}
+    for name in pairs(espBillboards) do table.insert(keys, name) end
+    for _, name in ipairs(keys) do cleanupPlayerESP(name) end
+end
+
+local function clearAllGunESP()
+    local keys = {}
+    for part in pairs(gunBillboards) do table.insert(keys, part) end
+    for _, part in ipairs(keys) do
+        local bb = gunBillboards[part]
+        gunBillboards[part] = nil
+        if bb then bb:Destroy() end
     end
 end
 
 local function updateESP()
     if not Config.ESP.Enabled then
-        for name, _ in pairs(espBillboards) do cleanupPlayerESP(name) end
-        for gunPart, bb in pairs(gunBillboards) do
-            bb:Destroy()
-            gunBillboards[gunPart] = nil
-        end
+        clearAllPlayerESP()
+        clearAllGunESP()
         return
     end
 
     local meChar = LocalPlayer.Character
     if not meChar or not meChar:FindFirstChild("HumanoidRootPart") then
-        for name, _ in pairs(espBillboards) do cleanupPlayerESP(name) end
-        for gunPart, bb in pairs(gunBillboards) do
-            bb:Destroy()
-            gunBillboards[gunPart] = nil
-        end
+        clearAllPlayerESP()
+        clearAllGunESP()
         return
     end
 
     local seen = {}
     for _, player in pairs(Players:GetPlayers()) do
         if player == LocalPlayer then continue end
-        if not player.Character then cleanupPlayerESP(player.Name) continue end
+        if not player.Character then continue end
         local head = player.Character:FindFirstChild("Head")
-        if not head then cleanupPlayerESP(player.Name) continue end
+        if not head then continue end
+
         local role, color = getRole(player)
         local show = true
         if role == "Murderer" and not Config.ESP.ShowMurderer then show = false end
         if role == "Sheriff" and not Config.ESP.ShowSheriff then show = false end
         if role == "Innocent" and not Config.ESP.ShowInnocent then show = false end
-        if not IsAlive(player) then color = Color3.fromRGB(128, 128, 128) end
-        if not show then cleanupPlayerESP(player.Name) continue end
+        if not IsAlive(player) then
+            color = Color3.fromRGB(128, 128, 128)
+        end
+        if not show then continue end
+
         seen[player.Name] = true
+
         local bb = espBillboards[player.Name]
         if not bb or not bb.Parent then
             bb = Instance.new("BillboardGui")
@@ -2028,6 +2122,7 @@ local function updateESP()
             bb.AlwaysOnTop = true
             bb.MaxDistance = math.huge
             bb.Parent = espFolder
+
             local lbl = Instance.new("TextLabel")
             lbl.Name = "NameLabel"
             lbl.Size = UDim2.new(1, 0, 1, 0)
@@ -2036,14 +2131,17 @@ local function updateESP()
             lbl.Font = Enum.Font.GothamBold
             lbl.TextSize = 14
             lbl.Parent = bb
+
             espBillboards[player.Name] = bb
         end
+
         bb.Adornee = head
         local lbl = bb:FindFirstChild("NameLabel")
         if lbl then
             lbl.TextColor3 = color
             lbl.Text = player.Name
         end
+
         if Config.ESP.Chams then
             local hl = espHighlights[player.Name]
             if not hl or not hl.Parent then
@@ -2057,21 +2155,29 @@ local function updateESP()
             hl.Adornee = player.Character
             hl.OutlineColor = color
         else
-            if espHighlights[player.Name] then
-                espHighlights[player.Name]:Destroy()
+            local hl = espHighlights[player.Name]
+            if hl then
                 espHighlights[player.Name] = nil
+                hl:Destroy()
             end
         end
     end
-    for name, _ in pairs(espBillboards) do
-        if not seen[name] then cleanupPlayerESP(name) end
+
+    local staleKeys = {}
+    for name in pairs(espBillboards) do
+        if not seen[name] then table.insert(staleKeys, name) end
     end
+    for _, name in ipairs(staleKeys) do
+        cleanupPlayerESP(name)
+    end
+
     if Config.ESP.GunESP then
         local seenGuns = {}
         for _, desc in ipairs(Workspace:GetDescendants()) do
             if desc:IsA("BasePart") and desc.Name == "GunDrop" then
                 seenGuns[desc] = true
-                if not gunBillboards[desc] or not gunBillboards[desc].Parent then
+                local existing = gunBillboards[desc]
+                if not existing or not existing.Parent then
                     local bb = Instance.new("BillboardGui")
                     bb.Name = "MM2_GunESP"
                     bb.Adornee = desc
@@ -2080,6 +2186,7 @@ local function updateESP()
                     bb.AlwaysOnTop = true
                     bb.MaxDistance = math.huge
                     bb.Parent = gunEspFolder
+
                     local lbl = Instance.new("TextLabel")
                     lbl.Size = UDim2.new(1, 0, 1, 0)
                     lbl.BackgroundTransparency = 1
@@ -2089,25 +2196,26 @@ local function updateESP()
                     lbl.TextColor3 = Color3.fromRGB(255, 255, 0)
                     lbl.Text = "Dropped Gun"
                     lbl.Parent = bb
+
                     gunBillboards[desc] = bb
                 end
             end
         end
-        for gunPart, bb in pairs(gunBillboards) do
-            if not seenGuns[gunPart] then
-                bb:Destroy()
-                gunBillboards[gunPart] = nil
-            end
+        local staleGuns = {}
+        for gunPart in pairs(gunBillboards) do
+            if not seenGuns[gunPart] then table.insert(staleGuns, gunPart) end
+        end
+        for _, gunPart in ipairs(staleGuns) do
+            local bb = gunBillboards[gunPart]
+            gunBillboards[gunPart] = nil
+            if bb then bb:Destroy() end
         end
     else
-        for gunPart, bb in pairs(gunBillboards) do
-            bb:Destroy()
-            gunBillboards[gunPart] = nil
-        end
+        clearAllGunESP()
     end
 end
 
--- ===================== SPECTATE / GUN / SHOOT =====================
+-- ===================== SPECTATE =====================
 local spectateConnection = nil
 local function startSpectating(targetPlayer)
     if spectateConnection then spectateConnection:Disconnect() end
@@ -2124,6 +2232,7 @@ local function startSpectating(targetPlayer)
     end
 end
 
+-- ===================== AUTO GRAB GUN =====================
 local function autoGrabGun()
     if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return end
     if LocalPlayer.Backpack:FindFirstChild("Gun") or LocalPlayer.Character:FindFirstChild("Gun") then return end
@@ -2144,6 +2253,7 @@ local function autoGrabGun()
     end
 end
 
+-- ===================== AUTO SHOOT =====================
 local lastShotTime = 0
 local SHOOT_COOLDOWN = 0.3
 local autoEquippedGun = false
@@ -2453,5 +2563,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.14.2 - faster trail pool", 5)
-warn("[MM2] v4.14.2 ready")
+Notify("MM2 Script", "Loaded! v4.14.3 - route-aware innocent", 5)
+warn("[MM2] v4.14.3 ready")

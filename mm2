@@ -1,7 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.14.0  (innocent = merged trail pool → path to safest reachable cell)
-    FULL — no placeholders
+    Version: 4.14.1  (trail pool innocent + fixed ESP + full troll tab)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -19,6 +18,7 @@ local Stats = game:GetService("Stats")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 local JUMP_COOLDOWN = 0.35
 
@@ -32,6 +32,7 @@ local function Notify(title, text, duration)
     warn("[MM2] [" .. tostring(title) .. "] " .. tostring(text))
 end
 
+-- ===================== MAP HIDE LOCATIONS =====================
 local MapHidePositions = {
     ["biolab"] = Vector3.new(647, 297, 9864),
     ["house2"] = Vector3.new(61, 265, 9055),
@@ -62,6 +63,7 @@ local function getCurrentMap()
     return nil
 end
 
+-- ===================== SAVE SYSTEM =====================
 local SaveFile = "MM2_Settings.json"
 local Config
 
@@ -102,6 +104,7 @@ local function LoadSettings()
     return {}
 end
 
+-- ===================== CONFIG =====================
 local savedData = LoadSettings()
 
 Config = {
@@ -304,7 +307,7 @@ function Library.new()
     self.ScreenGui.Name = "MM2ScriptHub"
     self.ScreenGui.ResetOnSpawn = false
     self.ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    self.ScreenGui.Parent = game:GetService("CoreGui")
+    self.ScreenGui.Parent = PlayerGui
 
     self.Main = Instance.new("Frame")
     self.Main.Name = "Main"
@@ -346,7 +349,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.14.0"
+    title.Text = "MM2 Script  -  v4.14.1"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -711,7 +714,7 @@ local function stopTrapTrigger()
     trapProcessing = false
 end
 
--- ===================== FLING (KILASIK technique) =====================
+-- ===================== FLING (KILASIK) =====================
 getgenv().OldPos = nil
 getgenv().FPDH = workspace.FallenPartsDestroyHeight
 local FlingActive = false
@@ -1217,7 +1220,6 @@ local function startMurdererAutoPlay()
         local distanceToTarget = (myPos - targetPos).Magnitude
         local verticalGap = math.abs(myPos.Y - targetPos.Y)
 
-        -- Mirror target jump
         if Config.Helper.MirrorJump and target.Character then
             local targetHum = target.Character:FindFirstChildOfClass("Humanoid")
             if targetHum and canJump(hum) and distanceToTarget < 20 and verticalGap < 6 then
@@ -1688,7 +1690,7 @@ UI:CreateToggle(helperTab, "Trigger Traps", Config.Helper.TriggerTraps, function
     if v then startTrapTrigger() else stopTrapTrigger() end
 end)
 
--- ===================== TROLL TAB (fling) =====================
+-- ===================== TROLL TAB =====================
 UI:CreateLabel(trollTab, "Troll Features — Multi-Target Fling")
 local trollStatusLabel = Instance.new("TextLabel")
 trollStatusLabel.Size = UDim2.new(1, -10, 0, 22)
@@ -1911,81 +1913,173 @@ end
 if Config.Movement.TeleportSpawn then createSpawnBarrier() end
 if Config.Helper.TriggerTraps then startTrapTrigger() end
 
--- ===================== ESP =====================
+-- ===================== ESP (PlayerGui-based, in-place updates) =====================
 local espFolder = Instance.new("Folder")
-espFolder.Name = "ESPData"
-espFolder.Parent = UI.ScreenGui
+espFolder.Name = "MM2_ESPData"
+espFolder.Parent = PlayerGui
 local chamFolder = Instance.new("Folder")
-chamFolder.Name = "ChamData"
-chamFolder.Parent = UI.ScreenGui
+chamFolder.Name = "MM2_ChamData"
+chamFolder.Parent = PlayerGui
 local gunEspFolder = Instance.new("Folder")
-gunEspFolder.Name = "GunESPData"
-gunEspFolder.Parent = UI.ScreenGui
+gunEspFolder.Name = "MM2_GunESPData"
+gunEspFolder.Parent = PlayerGui
+
+local espBillboards = {}
+local espHighlights = {}
+local gunBillboards = {}
+
+local function cleanupPlayerESP(playerName)
+    if espBillboards[playerName] then
+        espBillboards[playerName]:Destroy()
+        espBillboards[playerName] = nil
+    end
+    if espHighlights[playerName] then
+        espHighlights[playerName]:Destroy()
+        espHighlights[playerName] = nil
+    end
+end
 
 local function updateESP()
-    for _, v in pairs(espFolder:GetChildren()) do v:Destroy() end
-    for _, v in pairs(chamFolder:GetChildren()) do v:Destroy() end
-    for _, v in pairs(gunEspFolder:GetChildren()) do v:Destroy() end
-    if not Config.ESP.Enabled then return end
-    if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return end
+    if not Config.ESP.Enabled then
+        for name, _ in pairs(espBillboards) do cleanupPlayerESP(name) end
+        for gunPart, bb in pairs(gunBillboards) do
+            bb:Destroy()
+            gunBillboards[gunPart] = nil
+        end
+        return
+    end
+
+    local meChar = LocalPlayer.Character
+    if not meChar or not meChar:FindFirstChild("HumanoidRootPart") then
+        for name, _ in pairs(espBillboards) do cleanupPlayerESP(name) end
+        for gunPart, bb in pairs(gunBillboards) do
+            bb:Destroy()
+            gunBillboards[gunPart] = nil
+        end
+        return
+    end
+
+    local seen = {}
 
     for _, player in pairs(Players:GetPlayers()) do
         if player == LocalPlayer then continue end
-        if not player.Character or not player.Character:FindFirstChild("Head") then continue end
-        local role, color = getRole(player)
-        if role == "Murderer" and not Config.ESP.ShowMurderer then continue end
-        if role == "Sheriff" and not Config.ESP.ShowSheriff then continue end
-        if role == "Innocent" and not Config.ESP.ShowInnocent then continue end
-        if not IsAlive(player) then color = Color3.fromRGB(128, 128, 128) end
-
-        if Config.ESP.Chams then
-            local cham = Instance.new("Highlight")
-            cham.Name = player.Name
-            cham.FillTransparency = 1
-            cham.OutlineColor = color
-            cham.Adornee = player.Character
-            cham.Parent = chamFolder
+        if not player.Character then
+            cleanupPlayerESP(player.Name)
+            continue
+        end
+        local head = player.Character:FindFirstChild("Head")
+        if not head then
+            cleanupPlayerESP(player.Name)
+            continue
         end
 
-        local billboard = Instance.new("BillboardGui")
-        billboard.Name = player.Name
-        billboard.Adornee = player.Character.Head
-        billboard.Size = UDim2.new(0, 200, 0, 24)
-        billboard.StudsOffset = Vector3.new(0, 2.5, 0)
-        billboard.AlwaysOnTop = true
-        billboard.MaxDistance = math.huge
-        billboard.Parent = espFolder
-        local label = Instance.new("TextLabel")
-        label.Size = UDim2.new(1, 0, 1, 0)
-        label.BackgroundTransparency = 1
-        label.TextStrokeTransparency = 0
-        label.Font = Enum.Font.GothamBold
-        label.TextSize = 14
-        label.TextColor3 = color
-        label.Text = player.Name
-        label.Parent = billboard
+        local role, color = getRole(player)
+        local show = true
+        if role == "Murderer" and not Config.ESP.ShowMurderer then show = false end
+        if role == "Sheriff" and not Config.ESP.ShowSheriff then show = false end
+        if role == "Innocent" and not Config.ESP.ShowInnocent then show = false end
+        if not IsAlive(player) then
+            color = Color3.fromRGB(128, 128, 128)
+        end
+
+        if not show then
+            cleanupPlayerESP(player.Name)
+            continue
+        end
+
+        seen[player.Name] = true
+
+        local bb = espBillboards[player.Name]
+        if not bb or not bb.Parent then
+            bb = Instance.new("BillboardGui")
+            bb.Name = "MM2_ESP_" .. player.Name
+            bb.Size = UDim2.new(0, 200, 0, 24)
+            bb.StudsOffset = Vector3.new(0, 2.5, 0)
+            bb.AlwaysOnTop = true
+            bb.MaxDistance = math.huge
+            bb.Parent = espFolder
+
+            local lbl = Instance.new("TextLabel")
+            lbl.Name = "NameLabel"
+            lbl.Size = UDim2.new(1, 0, 1, 0)
+            lbl.BackgroundTransparency = 1
+            lbl.TextStrokeTransparency = 0
+            lbl.Font = Enum.Font.GothamBold
+            lbl.TextSize = 14
+            lbl.Parent = bb
+
+            espBillboards[player.Name] = bb
+        end
+        bb.Adornee = head
+        local lbl = bb:FindFirstChild("NameLabel")
+        if lbl then
+            lbl.TextColor3 = color
+            lbl.Text = player.Name
+        end
+
+        if Config.ESP.Chams then
+            local hl = espHighlights[player.Name]
+            if not hl or not hl.Parent then
+                hl = Instance.new("Highlight")
+                hl.Name = "MM2_Cham_" .. player.Name
+                hl.FillTransparency = 1
+                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                hl.Parent = chamFolder
+                espHighlights[player.Name] = hl
+            end
+            hl.Adornee = player.Character
+            hl.OutlineColor = color
+        else
+            if espHighlights[player.Name] then
+                espHighlights[player.Name]:Destroy()
+                espHighlights[player.Name] = nil
+            end
+        end
+    end
+
+    for name, _ in pairs(espBillboards) do
+        if not seen[name] then cleanupPlayerESP(name) end
     end
 
     if Config.ESP.GunESP then
-        for _, desc in pairs(Workspace:GetDescendants()) do
+        local seenGuns = {}
+        for _, desc in ipairs(Workspace:GetDescendants()) do
             if desc:IsA("BasePart") and desc.Name == "GunDrop" then
-                local billboard = Instance.new("BillboardGui")
-                billboard.Adornee = desc
-                billboard.Size = UDim2.new(0, 200, 0, 24)
-                billboard.StudsOffset = Vector3.new(0, 2, 0)
-                billboard.AlwaysOnTop = true
-                billboard.MaxDistance = math.huge
-                billboard.Parent = gunEspFolder
-                local label = Instance.new("TextLabel")
-                label.Size = UDim2.new(1, 0, 1, 0)
-                label.BackgroundTransparency = 1
-                label.TextStrokeTransparency = 0
-                label.Font = Enum.Font.GothamBold
-                label.TextSize = 14
-                label.TextColor3 = Color3.fromRGB(255, 255, 0)
-                label.Text = "Dropped Gun"
-                label.Parent = billboard
+                seenGuns[desc] = true
+                if not gunBillboards[desc] or not gunBillboards[desc].Parent then
+                    local bb = Instance.new("BillboardGui")
+                    bb.Name = "MM2_GunESP"
+                    bb.Adornee = desc
+                    bb.Size = UDim2.new(0, 200, 0, 24)
+                    bb.StudsOffset = Vector3.new(0, 2, 0)
+                    bb.AlwaysOnTop = true
+                    bb.MaxDistance = math.huge
+                    bb.Parent = gunEspFolder
+
+                    local lbl = Instance.new("TextLabel")
+                    lbl.Size = UDim2.new(1, 0, 1, 0)
+                    lbl.BackgroundTransparency = 1
+                    lbl.TextStrokeTransparency = 0
+                    lbl.Font = Enum.Font.GothamBold
+                    lbl.TextSize = 14
+                    lbl.TextColor3 = Color3.fromRGB(255, 255, 0)
+                    lbl.Text = "Dropped Gun"
+                    lbl.Parent = bb
+
+                    gunBillboards[desc] = bb
+                end
             end
+        end
+        for gunPart, bb in pairs(gunBillboards) do
+            if not seenGuns[gunPart] then
+                bb:Destroy()
+                gunBillboards[gunPart] = nil
+            end
+        end
+    else
+        for gunPart, bb in pairs(gunBillboards) do
+            bb:Destroy()
+            gunBillboards[gunPart] = nil
         end
     end
 end
@@ -2286,9 +2380,17 @@ killScript = function()
     stopTrapTrigger()
     destroySpawnBarrier()
     stopSpectating()
+    for name, _ in pairs(espBillboards) do cleanupPlayerESP(name) end
+    for gunPart, bb in pairs(gunBillboards) do bb:Destroy() end
+    gunBillboards = {}
+    espBillboards = {}
+    espHighlights = {}
     for _, conn in ipairs(connections) do pcall(function() conn:Disconnect() end) end
     for _, t in ipairs(threads) do pcall(function() task.cancel(t) end) end
     pcall(function() UI.ScreenGui:Destroy() end)
+    pcall(function() espFolder:Destroy() end)
+    pcall(function() chamFolder:Destroy() end)
+    pcall(function() gunEspFolder:Destroy() end)
     if Config.Visuals.FullBright then
         Lighting.Brightness = 1; Lighting.ClockTime = 14; Lighting.FogEnd = 1000
         Lighting.GlobalShadows = true
@@ -2330,5 +2432,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.14.0 - trail pool innocent autoplay", 5)
-warn("[MM2] v4.14.0 ready")
+Notify("MM2 Script", "Loaded! v4.14.1 - trail pool + fixed ESP", 5)
+warn("[MM2] v4.14.1 ready")

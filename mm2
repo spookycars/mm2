@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.14.0  (innocent targets coins furthest from murderer, infinite jump fixed)
+    Version: 4.15.0  (innocent coin instant-collect + murderer avoidance fixed)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -318,7 +318,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.14.0"
+    title.Text = "MM2 Script  -  v4.15.0"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -1441,8 +1441,6 @@ local function resetPathState()
 end
 
 -- ============ FIXED JUMP HELPER ============
--- Only jump when actually on the ground. No ChangeState forcing.
--- Clears Jump flag one frame later so it can't queue on landing.
 local function tryJump(hum, now)
     if not hum or hum.Health <= 0 then return false end
     if hum.FloorMaterial == Enum.Material.Air then return false end
@@ -1459,7 +1457,6 @@ local function tryJump(hum, now)
     hum.Jump = true
     pathState.lastJumpTime = now
 
-    -- Clear the jump flag next frame so it doesn't queue another jump on landing
     task.defer(function()
         if hum and hum.Parent then
             hum.Jump = false
@@ -1509,7 +1506,6 @@ local function shouldMirrorJump(myChar, myHum, myRoot, targetChar)
     if not targetHum or not targetRoot then return false end
     if not myHum or not myRoot then return false end
 
-    -- Only mirror if we're on the ground
     if myHum.FloorMaterial == Enum.Material.Air then return false end
 
     local myState = myHum:GetState()
@@ -1560,7 +1556,6 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
 
     if waypointIndex > #waypoints then return "arrived", waypointIndex end
 
-    -- Jump waypoint handling
     for i = waypointIndex, math.min(waypointIndex + 1, #waypoints) do
         local wp = waypoints[i]
         if wp.Action == Enum.PathWaypointAction.Jump then
@@ -1675,7 +1670,7 @@ local function isCoinName(name)
 end
 
 local function getCoins(now)
-    if (now - lastCoinScan) < 0.5 and #coinCache > 0 then return coinCache end
+    if (now - lastCoinScan) < 0.4 and #coinCache > 0 then return coinCache end
     lastCoinScan = now
     coinCache = {}
     for _, obj in ipairs(Workspace:GetDescendants()) do
@@ -1698,11 +1693,24 @@ local function pathPassesNearMurderer(myPos, coinPos, murdererPos, threshold)
     return (closest - murdererPos).Magnitude < threshold
 end
 
+-- ============ RAYCAST: DOES LINE HIT CHARACTER ============
+local function lineHitsCharacter(fromPos, toPos, charToAvoid)
+    if not charToAvoid then return false end
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Include
+    rp.FilterDescendantsInstances = {charToAvoid}
+    local dir = (toPos - fromPos)
+    if dir.Magnitude < 0.1 then return false end
+    local hit = workspace:Raycast(fromPos + Vector3.new(0, 2.5, 0), dir, rp)
+    return hit ~= nil
+end
+
 -- ============ CHASE LOOP (generic) ============
 local function runChaseLoop(params)
     local getTarget = params.getTarget
     local onArrived = params.onArrived
     local mirrorJump = params.mirrorJump or false
+    local aggressive = params.aggressive or false
 
     local connection = nil
     local active = true
@@ -1711,9 +1719,10 @@ local function runChaseLoop(params)
     local FAILED_RETRY_COOLDOWN = 2.0
     local ATTACK_DISTANCE = 2
     local STAB_SWING_RANGE = 3
-    local CLOSE_GAP_RANGE = 6
+    local CLOSE_GAP_RANGE = aggressive and 25 or 6
     local PATH_RECOMPUTE_TARGET_DELTA = 10
-    local MIN_DIRECT_CHASE_DIST = 6
+    local MIN_DIRECT_CHASE_DIST = aggressive and 0 or 6
+    local TARGET_WALKSPEED = aggressive and 28 or 16
     local stuckCheckPos = nil
     local stuckCheckTime = 0
     local stuckCounter = 0
@@ -1749,7 +1758,7 @@ local function runChaseLoop(params)
             return
         end
 
-        if hum.WalkSpeed < 16 then hum.WalkSpeed = 16 end
+        if hum.WalkSpeed < TARGET_WALKSPEED then hum.WalkSpeed = TARGET_WALKSPEED end
         if hum.JumpPower < 50 then hum.JumpPower = 50 end
         hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
 
@@ -1764,6 +1773,33 @@ local function runChaseLoop(params)
 
         local distanceToTarget = (myPos - targetPos).Magnitude
         local verticalGap = math.abs(myPos.Y - targetPos.Y)
+
+        -- Live murderer-avoidance for coin targets
+        if target.coin and Murder then
+            local mP = Players:FindFirstChild(Murder)
+            if mP and mP.Character then
+                local mR = mP.Character:FindFirstChild("HumanoidRootPart")
+                if mR then
+                    local mPos = mR.Position
+                    if (mPos - myPos).Magnitude < 16 then
+                        if target.coin then committedCoin = nil; committedCoinPos = nil end
+                        pcall(function() hum:Move(Vector3.zero) end)
+                        return
+                    end
+                    if pathPassesNearMurderer(myPos, targetPos, mPos, 12)
+                        or lineHitsCharacter(myPos, targetPos, mP.Character) then
+                        if target.coin then committedCoin = nil; committedCoinPos = nil end
+                        local alt = pickFurthestSafeCoin(myPos, mPos, now)
+                        if alt then
+                            committedCoin = alt.coin
+                            committedCoinPos = alt.pos
+                            committedSince = now
+                        end
+                        return
+                    end
+                end
+            end
+        end
 
         if mirrorJump and Config.Helper.MirrorJump and target.character then
             if shouldMirrorJump(char, hum, myRoot, target.character) then
@@ -1788,7 +1824,7 @@ local function runChaseLoop(params)
             end
         end
 
-        if Config.Helper.DirectChase then
+        if Config.Helper.DirectChase or aggressive then
             if canReachDirectly(myPos, targetPos, char) then
                 if shouldJumpOverObstacle(char, hum, myRoot, targetPos) then
                     if tryJump(hum, now) then return end
@@ -1824,6 +1860,7 @@ local function runChaseLoop(params)
                     stuckCounter = 0
                     resetPathState()
                     lastPathTargetPos = nil
+                    if target.coin then committedCoin = nil; committedCoinPos = nil end
                     return
                 end
             else
@@ -1959,9 +1996,45 @@ local function getMurdererTarget(myPos, char, now, lastUnreachableTarget, lastUn
     return target
 end
 
--- ============ INNOCENT COIN TARGET ============
--- Finds coins furthest from the murderer. Skips coins whose
--- straight-line path would pass within 15 studs of the murderer.
+-- ============ INNOCENT COIN TARGET (stateful, committed) ============
+local committedCoin = nil
+local committedCoinPos = nil
+local committedSince = 0
+local COMMIT_TIMEOUT = 20
+
+local function pickFurthestSafeCoin(myPos, murdererPos, now)
+    local coins = getCoins(now)
+    if #coins == 0 then return nil end
+
+    local murdererPlayer = Murder and Players:FindFirstChild(Murder)
+    local murdererChar = murdererPlayer and murdererPlayer.Character
+
+    local candidates = {}
+    for _, coin in ipairs(coins) do
+        local coinPos = coin.Position
+        local distFromMe = (coinPos - myPos).Magnitude
+        local distFromMurderer = murdererPos and (coinPos - murdererPos).Magnitude or 0
+
+        if murdererPos and pathPassesNearMurderer(myPos, coinPos, murdererPos, 25) then
+            continue
+        end
+        if murdererPos and distFromMurderer < 25 then continue end
+        if murdererChar and lineHitsCharacter(myPos, coinPos, murdererChar) then
+            continue
+        end
+
+        table.insert(candidates, {
+            coin = coin,
+            pos = coinPos,
+            score = distFromMurderer - distFromMe * 0.15,
+        })
+    end
+
+    if #candidates == 0 then return nil end
+    table.sort(candidates, function(a, b) return a.score > b.score end)
+    return candidates[1]
+end
+
 local function getInnocentCoinTarget(myPos, char, now)
     local murdererPlayer = Murder and Players:FindFirstChild(Murder)
     local murdererPos = nil
@@ -1970,40 +2043,37 @@ local function getInnocentCoinTarget(myPos, char, now)
         if mRoot then murdererPos = mRoot.Position end
     end
 
-    local coins = getCoins(now)
-    if #coins == 0 then return nil end
-
-    local candidates = {}
-    for _, coin in ipairs(coins) do
-        local coinPos = coin.Position
-        local distFromMe = (coinPos - myPos).Magnitude
-        local distFromMurderer = murdererPos and (coinPos - murdererPos).Magnitude or 0
-
-        -- Skip coins that would route past the murderer
-        if murdererPos and pathPassesNearMurderer(myPos, coinPos, murdererPos, 15) then
-            continue
+    if committedCoin then
+        local stillThere = committedCoin.Parent ~= nil
+            and (committedCoin.Position - committedCoinPos).Magnitude < 5
+        local timedOut = (now - committedSince) > COMMIT_TIMEOUT
+        if not stillThere or timedOut then
+            committedCoin = nil
+            committedCoinPos = nil
         end
-
-        -- Skip coins basically on top of the murderer
-        if murdererPos and distFromMurderer < 20 then continue end
-
-        table.insert(candidates, {
-            coin = coin,
-            pos = coinPos,
-            score = distFromMurderer - distFromMe * 0.2,
-        })
     end
 
-    if #candidates == 0 then return nil end
+    if not committedCoin then
+        local pick = pickFurthestSafeCoin(myPos, murdererPos, now)
+        if not pick then return nil end
+        committedCoin = pick.coin
+        committedCoinPos = pick.pos
+        committedSince = now
+    end
 
-    table.sort(candidates, function(a, b) return a.score > b.score end)
+    if murdererPos and committedCoinPos then
+        if (murdererPos - committedCoinPos).Magnitude < 30 then
+            committedCoin = nil
+            committedCoinPos = nil
+            return nil
+        end
+    end
 
-    local best = candidates[1]
     return {
-        position = best.pos,
-        name = "Coin_" .. tostring(best.coin),
+        position = committedCoinPos,
+        name = "Coin",
         character = nil,
-        coin = best.coin,
+        coin = committedCoin,
     }
 end
 
@@ -2039,12 +2109,16 @@ local innocentAutoPlayStop = nil
 
 local function stopInnocentAutoPlay()
     innocentAutoPlayActive = false
+    committedCoin = nil
+    committedCoinPos = nil
     if innocentAutoPlayStop then innocentAutoPlayStop(); innocentAutoPlayStop = nil end
 end
 
 local function startInnocentAutoPlay()
     if innocentAutoPlayActive then return end
     innocentAutoPlayActive = true
+    committedCoin = nil
+    committedCoinPos = nil
     local coinCount = #getCoins(tick())
     Notify("Innocent Auto", "Collecting " .. coinCount .. " coin(s) far from murderer", 3)
 
@@ -2052,8 +2126,8 @@ local function startInnocentAutoPlay()
         getTarget = function(myPos, char, now)
             return getInnocentCoinTarget(myPos, char, now)
         end,
-        mirrorJump = false
-        -- no onArrived — walking over the coin collects it via Touched
+        mirrorJump = false,
+        aggressive = true,
     })
 end
 
@@ -2264,5 +2338,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.14.0 — innocent coin collection + infinite jump fixed", 5)
-warn("[MM2] v4.14.0 ready")
+Notify("MM2 Script", "Loaded! v4.15.0 — innocent coin instant-collect + murderer avoidance", 5)
+warn("[MM2] v4.15.0 ready")

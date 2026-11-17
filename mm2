@@ -1,6 +1,6 @@
 --[[
     Murder Mystery 2 Script
-    Version: 4.13.2  (innocent autoplay validates target reachability)
+    Version: 4.14.0  (innocent targets coins furthest from murderer, infinite jump fixed)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -318,7 +318,7 @@ function Library.new()
     title.Size = UDim2.new(1, -50, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "MM2 Script  -  v4.13.2"
+    title.Text = "MM2 Script  -  v4.14.0"
     title.TextColor3 = Color3.fromRGB(255, 80, 80)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 16
@@ -912,7 +912,7 @@ if savedData.SelectedPlayer then
     if savedPlayer then Config.Helper.SelectedPlayer = savedPlayer end
 end
 UI:CreateToggle(helperTab, "Auto Player (Murderer)", Config.Helper.AutoPlayer, function(v) Config.Helper.AutoPlayer = v end)
-UI:CreateToggle(helperTab, "Innocent Avoid (Furthest from Murderer)", Config.Helper.InnocentAutoPlayer, function(v) Config.Helper.InnocentAutoPlayer = v end)
+UI:CreateToggle(helperTab, "Innocent: Collect Coins Far From Murderer", Config.Helper.InnocentAutoPlayer, function(v) Config.Helper.InnocentAutoPlayer = v end)
 UI:CreateToggle(helperTab, "Direct Chase (skip pathfinding)", Config.Helper.DirectChase, function(v) Config.Helper.DirectChase = v end)
 UI:CreateToggle(helperTab, "Mirror Target Jumps", Config.Helper.MirrorJump, function(v) Config.Helper.MirrorJump = v end)
 UI:CreateToggle(helperTab, "Auto Grab Gun When Player Near", Config.Helper.AutoGrabGunNearPlayer, function(v) Config.Helper.AutoGrabGunNearPlayer = v end)
@@ -1383,18 +1383,6 @@ local function canReachDirectly(fromPos, toPos, ignoreChar)
     return isClear
 end
 
-local function makeSyntheticDirectPath(fromPos, toPos)
-    return {
-        Status = Enum.PathStatus.Success,
-        GetWaypoints = function()
-            return {
-                { Position = fromPos, Action = Enum.PathWaypointAction.Walk },
-                { Position = toPos,   Action = Enum.PathWaypointAction.Walk },
-            }
-        end
-    }
-end
-
 local function computePathTo(fromPos, toPos)
     local ok, path = pcall(function()
         return PathfindingService:CreatePath({
@@ -1452,6 +1440,35 @@ local function resetPathState()
     pathState.lastHorizVel = 0
 end
 
+-- ============ FIXED JUMP HELPER ============
+-- Only jump when actually on the ground. No ChangeState forcing.
+-- Clears Jump flag one frame later so it can't queue on landing.
+local function tryJump(hum, now)
+    if not hum or hum.Health <= 0 then return false end
+    if hum.FloorMaterial == Enum.Material.Air then return false end
+    local state = hum:GetState()
+    if state == Enum.HumanoidStateType.Jumping
+        or state == Enum.HumanoidStateType.Freefall
+        or state == Enum.HumanoidStateType.FallingDown
+        or state == Enum.HumanoidStateType.Climbing
+        or state == Enum.HumanoidStateType.Swimming then
+        return false
+    end
+    if (now - pathState.lastJumpTime) < 0.7 then return false end
+
+    hum.Jump = true
+    pathState.lastJumpTime = now
+
+    -- Clear the jump flag next frame so it doesn't queue another jump on landing
+    task.defer(function()
+        if hum and hum.Parent then
+            hum.Jump = false
+        end
+    end)
+
+    return true
+end
+
 local function shouldJumpOverObstacle(char, hum, myRoot, moveTarget)
     if not moveTarget then return false end
     local myPos = myRoot.Position
@@ -1492,6 +1509,9 @@ local function shouldMirrorJump(myChar, myHum, myRoot, targetChar)
     if not targetHum or not targetRoot then return false end
     if not myHum or not myRoot then return false end
 
+    -- Only mirror if we're on the ground
+    if myHum.FloorMaterial == Enum.Material.Air then return false end
+
     local myState = myHum:GetState()
     if myState == Enum.HumanoidStateType.Jumping
         or myState == Enum.HumanoidStateType.Freefall
@@ -1501,7 +1521,6 @@ local function shouldMirrorJump(myChar, myHum, myRoot, targetChar)
 
     local dist = (myRoot.Position - targetRoot.Position).Magnitude
     if dist > 20 then return false end
-
     if math.abs(myRoot.Position.Y - targetRoot.Position.Y) > 6 then return false end
 
     if targetHum.Jump == true then return true end
@@ -1541,15 +1560,15 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
 
     if waypointIndex > #waypoints then return "arrived", waypointIndex end
 
+    -- Jump waypoint handling
     for i = waypointIndex, math.min(waypointIndex + 1, #waypoints) do
         local wp = waypoints[i]
         if wp.Action == Enum.PathWaypointAction.Jump then
             local horizDist = Vector3.new(wp.Position.X - myPos.X, 0, wp.Position.Z - myPos.Z).Magnitude
-            if horizDist <= 6 and (now - pathState.lastJumpTime) > 0.4 then
-                hum.Jump = true
-                pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-                pathState.lastJumpTime = now
-                return "walking", waypointIndex
+            if horizDist <= 6 then
+                if tryJump(hum, now) then
+                    return "walking", waypointIndex
+                end
             end
             break
         end
@@ -1594,10 +1613,7 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
     end
 
     if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
-        if (now - pathState.lastJumpTime) > 0.5 then
-            hum.Jump = true
-            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-            pathState.lastJumpTime = now
+        if tryJump(hum, now) then
             return "walking", waypointIndex
         end
     end
@@ -1606,11 +1622,8 @@ local function executeWaypointPath(char, hum, myRoot, waypoints, waypointIndex, 
         myRoot.AssemblyLinearVelocity.X, 0, myRoot.AssemblyLinearVelocity.Z
     ).Magnitude
     if pathState.lastHorizVel > 4 and horizVel < 1 then
-        if (now - pathState.lastJumpTime) > 0.6 then
-            if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
-                hum.Jump = true
-                pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-                pathState.lastJumpTime = now
+        if shouldJumpOverObstacle(char, hum, myRoot, nextWp.Position) then
+            if tryJump(hum, now) then
                 pathState.lastHorizVel = horizVel
                 return "walking", waypointIndex
             end
@@ -1648,6 +1661,44 @@ local function canRunAutoplay(char, hum)
     return true
 end
 
+-- ============ COIN DETECTION ============
+local COIN_KEYWORDS = {"coin", "cash", "money"}
+local coinCache = {}
+local lastCoinScan = 0
+
+local function isCoinName(name)
+    local n = string.lower(name)
+    for _, kw in ipairs(COIN_KEYWORDS) do
+        if n:find(kw, 1, true) then return true end
+    end
+    return false
+end
+
+local function getCoins(now)
+    if (now - lastCoinScan) < 0.5 and #coinCache > 0 then return coinCache end
+    lastCoinScan = now
+    coinCache = {}
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and isCoinName(obj.Name) then
+            table.insert(coinCache, obj)
+        end
+    end
+    return coinCache
+end
+
+-- ============ PATH PASSES NEAR MURDERER CHECK ============
+local function pathPassesNearMurderer(myPos, coinPos, murdererPos, threshold)
+    if not murdererPos then return false end
+    local line = coinPos - myPos
+    local len = line.Magnitude
+    if len < 0.1 then return false end
+    local t = ((murdererPos - myPos):Dot(line)) / (len * len)
+    t = math.clamp(t, 0, 1)
+    local closest = myPos + line * t
+    return (closest - murdererPos).Magnitude < threshold
+end
+
+-- ============ CHASE LOOP (generic) ============
 local function runChaseLoop(params)
     local getTarget = params.getTarget
     local onArrived = params.onArrived
@@ -1707,19 +1758,16 @@ local function runChaseLoop(params)
 
         local target = getTarget(myPos, char, now, lastUnreachableTarget, lastUnreachableTime, UNREACHABLE_COOLDOWN)
         if not target then return end
-        if not target.Character or not target.Character:FindFirstChild("HumanoidRootPart") then return end
 
-        local targetPos = target.Character.HumanoidRootPart.Position
+        local targetPos = target.position
+        if not targetPos then return end
+
         local distanceToTarget = (myPos - targetPos).Magnitude
         local verticalGap = math.abs(myPos.Y - targetPos.Y)
 
-        if mirrorJump and Config.Helper.MirrorJump then
-            if shouldMirrorJump(char, hum, myRoot, target.Character) then
-                if (now - pathState.lastJumpTime) > 0.3 then
-                    hum.Jump = true
-                    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-                    pathState.lastJumpTime = now
-                end
+        if mirrorJump and Config.Helper.MirrorJump and target.character then
+            if shouldMirrorJump(char, hum, myRoot, target.character) then
+                tryJump(hum, now)
             end
         end
 
@@ -1743,12 +1791,7 @@ local function runChaseLoop(params)
         if Config.Helper.DirectChase then
             if canReachDirectly(myPos, targetPos, char) then
                 if shouldJumpOverObstacle(char, hum, myRoot, targetPos) then
-                    if (now - pathState.lastJumpTime) > 0.5 then
-                        hum.Jump = true
-                        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-                        pathState.lastJumpTime = now
-                        return
-                    end
+                    if tryJump(hum, now) then return end
                 end
                 hum:MoveTo(targetPos)
                 return
@@ -1772,13 +1815,11 @@ local function runChaseLoop(params)
         elseif tick() - stuckCheckTime >= 0.6 then
             if (myPos - stuckCheckPos).Magnitude < 1.5 then
                 stuckCounter = stuckCounter + 1
-                if (now - pathState.lastJumpTime) > 0.6 and shouldJumpOverObstacle(char, hum, myRoot, targetPos) then
-                    hum.Jump = true
-                    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-                    pathState.lastJumpTime = now
+                if shouldJumpOverObstacle(char, hum, myRoot, targetPos) then
+                    tryJump(hum, now)
                 end
                 if stuckCounter >= 3 then
-                    lastUnreachableTarget = target.Name
+                    lastUnreachableTarget = target.name
                     lastUnreachableTime = now
                     stuckCounter = 0
                     resetPathState()
@@ -1793,12 +1834,9 @@ local function runChaseLoop(params)
         end
 
         if canDirectChase then
-            if verticalGap > 1.5 and (now - pathState.lastJumpTime) > 0.5 then
+            if verticalGap > 1.5 then
                 if shouldJumpOverObstacle(char, hum, myRoot, targetPos) then
-                    hum.Jump = true
-                    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
-                    pathState.lastJumpTime = now
-                    return
+                    if tryJump(hum, now) then return end
                 end
             end
             hum:MoveTo(targetPos)
@@ -1837,7 +1875,15 @@ local function runChaseLoop(params)
             local newPath, wpsOrNil = computePathTo(myPos, pathGoal)
             if not newPath then
                 if canReachDirectly(myPos, pathGoal, char) then
-                    newPath = makeSyntheticDirectPath(myPos, pathGoal)
+                    newPath = {
+                        Status = Enum.PathStatus.Success,
+                        GetWaypoints = function()
+                            return {
+                                { Position = myPos,    Action = Enum.PathWaypointAction.Walk },
+                                { Position = pathGoal, Action = Enum.PathWaypointAction.Walk },
+                            }
+                        end
+                    }
                     wpsOrNil = newPath:GetWaypoints()
                 end
             end
@@ -1888,6 +1934,7 @@ local function runChaseLoop(params)
     end
 end
 
+-- ============ MURDERER TARGET ============
 local function getMurdererTarget(myPos, char, now, lastUnreachableTarget, lastUnreachableTime, cooldown)
     local target = nil
     local nearest = math.huge
@@ -1897,61 +1944,70 @@ local function getMurdererTarget(myPos, char, now, lastUnreachableTarget, lastUn
         if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then continue end
         if not IsAlive(player) then continue end
         if player.Name == lastUnreachableTarget and (now - lastUnreachableTime) < cooldown then continue end
-        local dist = (myPos - player.Character.HumanoidRootPart.Position).Magnitude
-        if dist < nearest then nearest = dist; target = player end
+        local pPos = player.Character.HumanoidRootPart.Position
+        local dist = (myPos - pPos).Magnitude
+        if dist < nearest then
+            nearest = dist
+            target = {
+                position = pPos,
+                name = player.Name,
+                character = player.Character,
+                player = player,
+            }
+        end
     end
     return target
 end
 
-local function getInnocentTarget(myPos, char, now, lastUnreachableTarget, lastUnreachableTime, cooldown)
+-- ============ INNOCENT COIN TARGET ============
+-- Finds coins furthest from the murderer. Skips coins whose
+-- straight-line path would pass within 15 studs of the murderer.
+local function getInnocentCoinTarget(myPos, char, now)
     local murdererPlayer = Murder and Players:FindFirstChild(Murder)
     local murdererPos = nil
     if murdererPlayer and murdererPlayer.Character then
         local mRoot = murdererPlayer.Character:FindFirstChild("HumanoidRootPart")
         if mRoot then murdererPos = mRoot.Position end
     end
-    if not murdererPos then return nil end
 
-    local myDistFromMurderer = (murdererPos - myPos).Magnitude
+    local coins = getCoins(now)
+    if #coins == 0 then return nil end
 
     local candidates = {}
-    for _, player in pairs(Players:GetPlayers()) do
-        if player == LocalPlayer then continue end
-        if player.Name == Murder then continue end
-        if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then continue end
-        if not IsAlive(player) then continue end
-        if player.Name == lastUnreachableTarget and (now - lastUnreachableTime) < cooldown then continue end
+    for _, coin in ipairs(coins) do
+        local coinPos = coin.Position
+        local distFromMe = (coinPos - myPos).Magnitude
+        local distFromMurderer = murdererPos and (coinPos - murdererPos).Magnitude or 0
 
-        local pPos = player.Character.HumanoidRootPart.Position
-        local distFromMurderer = (murdererPos - pPos).Magnitude
-        if distFromMurderer < myDistFromMurderer then continue end
+        -- Skip coins that would route past the murderer
+        if murdererPos and pathPassesNearMurderer(myPos, coinPos, murdererPos, 15) then
+            continue
+        end
 
-        table.insert(candidates, { player = player, pos = pPos, score = distFromMurderer })
+        -- Skip coins basically on top of the murderer
+        if murdererPos and distFromMurderer < 20 then continue end
+
+        table.insert(candidates, {
+            coin = coin,
+            pos = coinPos,
+            score = distFromMurderer - distFromMe * 0.2,
+        })
     end
+
+    if #candidates == 0 then return nil end
 
     table.sort(candidates, function(a, b) return a.score > b.score end)
 
-    for i = 1, math.min(4, #candidates) do
-        local cand = candidates[i]
-        local straightDist = (cand.pos - myPos).Magnitude
-
-        if straightDist < 5 then return cand.player end
-
-        local testPath, testWps = computePathTo(myPos, cand.pos)
-        if not testPath or not testWps then continue end
-
-        local pathLen = 0
-        for j = 2, #testWps do
-            pathLen = pathLen + (testWps[j].Position - testWps[j-1].Position).Magnitude
-        end
-        if pathLen > straightDist * 2 then continue end
-
-        return cand.player
-    end
-
-    return nil
+    local best = candidates[1]
+    return {
+        position = best.pos,
+        name = "Coin_" .. tostring(best.coin),
+        character = nil,
+        coin = best.coin,
+    }
 end
 
+-- ============ AUTOPLAY STATE ============
 local murdererAutoPlayActive = false
 local murdererAutoPlayStop = nil
 
@@ -1989,14 +2045,19 @@ end
 local function startInnocentAutoPlay()
     if innocentAutoPlayActive then return end
     innocentAutoPlayActive = true
-    Notify("Innocent Auto", "Chasing player furthest from murderer", 3)
+    local coinCount = #getCoins(tick())
+    Notify("Innocent Auto", "Collecting " .. coinCount .. " coin(s) far from murderer", 3)
 
     innocentAutoPlayStop = runChaseLoop({
-        getTarget = getInnocentTarget,
+        getTarget = function(myPos, char, now)
+            return getInnocentCoinTarget(myPos, char, now)
+        end,
         mirrorJump = false
+        -- no onArrived — walking over the coin collects it via Touched
     })
 end
 
+-- ============ HELPER UPDATE ============
 local lastSpectateState = { sheriff = false, murderer = false }
 local lastNotifiedPerk = nil
 local lastMurderer = nil
@@ -2097,6 +2158,7 @@ local function updateHelper()
     end
 end
 
+-- ============ AUTO SHOOT MURDERER ============
 RunService.RenderStepped:Connect(function()
     if not Config.Combat.AutoShootMurderer then return end
     local myChar = LocalPlayer.Character
@@ -2139,6 +2201,7 @@ LocalPlayer.CharacterAdded:Connect(function()
     currentGunObject = nil
 end)
 
+-- ============ SPAWN TELEPORT LOOP ============
 RunService.Stepped:Connect(function()
     if not Config.Movement.TeleportSpawn then return end
     local char = LocalPlayer.Character
@@ -2201,5 +2264,5 @@ addThread(task.spawn(function()
 end))
 
 warn("[MM2] UI ready")
-Notify("MM2 Script", "Loaded! v4.13.2 - innocent validates target reachability", 5)
-warn("[MM2] v4.13.2 ready")
+Notify("MM2 Script", "Loaded! v4.14.0 — innocent coin collection + infinite jump fixed", 5)
+warn("[MM2] v4.14.0 ready")
